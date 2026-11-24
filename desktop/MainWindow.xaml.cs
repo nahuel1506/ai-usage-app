@@ -1,11 +1,9 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using static AIUsage.Formatters;
@@ -28,7 +26,6 @@ public partial class MainWindow : Window
         [ProviderKind.Antigravity] = new ProviderState(ProviderKind.Antigravity, MutedDot),
     };
 
-    private readonly UserSettings settings = UserSettings.Load();
     private readonly DispatcherTimer resizeDebounce;
     private readonly HashSet<string> expandedModels = new(StringComparer.OrdinalIgnoreCase);
     private ProviderKind activeProvider = ProviderKind.Codex;
@@ -131,7 +128,6 @@ public partial class MainWindow : Window
     private void SelectProvider(ProviderKind kind, bool refreshView)
     {
         activeProvider = kind;
-        PlanPriceBox.Text = settings.GetPlanPrice(kind).ToString("0.##", CultureInfo.InvariantCulture);
         UpdateProviderChrome();
         UpdateProviderLabels();
         UpdateButtons();
@@ -197,61 +193,11 @@ public partial class MainWindow : Window
         ShortBar.Value = WeekBar.Value = AltShortBar.Value = AltWeekBar.Value = 0;
         ShortReset.Text = WeekReset.Text = AltShortReset.Text = AltWeekReset.Text = "Sin datos";
         ShortAutonomy.Visibility = WeekAutonomy.Visibility = Visibility.Collapsed;
-        ApiCostValue.Text = PlanRoiValue.Text = CacheSavingsValue.Text = PaceValue.Text = "—";
+        ApiCostValue.Text = QuotaRateValue.Text = CacheSavingsValue.Text = PaceValue.Text = "—";
         CacheHitRateLabel.Text = "";
         CacheHitBar.Value = 0;
         InteractionsGrid.ItemsSource = null;
         InteractionDetail.Visibility = Visibility.Collapsed;
-    }
-
-    private void SavePlanPrice(object sender, RoutedEventArgs e) => ApplyPlanPriceInput();
-
-    private void PlanPriceKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Enter)
-        {
-            ApplyPlanPriceInput();
-            Keyboard.ClearFocus();
-        }
-    }
-
-    private void ApplyPlanPriceInput()
-    {
-        var raw = PlanPriceBox.Text.Replace(',', '.').Trim();
-        if (double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var price) && price >= 0 && price <= 10000)
-        {
-            settings.SetPlanPrice(activeProvider, price);
-            UpdatePlanRoi();
-        }
-        else
-        {
-            PlanPriceBox.Text = settings.GetPlanPrice(activeProvider).ToString("0.##", CultureInfo.InvariantCulture);
-        }
-    }
-
-    private void UpdatePlanRoi()
-    {
-        var p30 = Current.CurrentAnalytics.Get("periods").Get("30d");
-        var usd30 = p30.Get("apiCost").Number("usd");
-        var planPrice = settings.GetPlanPrice(activeProvider);
-        if (!usd30.HasValue)
-        {
-            PlanRoiValue.Text = "—";
-            PlanRoiSub.Text = "Sin consumo tarifado en 30 d";
-            return;
-        }
-        if (planPrice <= 0)
-        {
-            PlanRoiValue.Text = Money(usd30);
-            PlanRoiSub.Text = "Equivalente API en 30 días (plan gratis)";
-            return;
-        }
-        var roi = usd30.Value / planPrice;
-        PlanRoiValue.Text = $"{roi.ToString("0.#", Locale)}×";
-        var net = usd30.Value - planPrice;
-        PlanRoiSub.Text = net >= 0
-            ? $"{Money(usd30)} equiv. (+{Money(net)} sobre el plan)"
-            : $"{Money(usd30)} equiv. ({Money(planPrice - usd30.Value)} bajo el plan)";
     }
 
     private void SelectPeriod(object sender, RoutedEventArgs e)
@@ -600,11 +546,10 @@ public partial class MainWindow : Window
 
     private void RenderOverviewAnalytics()
     {
-        UpdatePlanRoi();
         var period = Current.CurrentAnalytics.Get("periods").Get(activePeriod);
         if (period.ValueKind != JsonValueKind.Object)
         {
-            ApiCostValue.Text = CacheSavingsValue.Text = PaceValue.Text = "—";
+            ApiCostValue.Text = QuotaRateValue.Text = CacheSavingsValue.Text = PaceValue.Text = "—";
             TopPromptsPanel.Children.Clear();
             ModelBreakdownPanel.Children.Clear();
             HeavyChatsPanel.Children.Clear();
@@ -620,6 +565,36 @@ public partial class MainWindow : Window
         ApiCostSub.Text = usd.HasValue
             ? $"In {Money(bd.Number("inputUsd"))} · Caché {Money(bd.Number("cacheReadUsd"))} · Out {Money(bd.Number("outputUsd"))}"
             : "Sin prompts tarifados";
+
+        // Empirical calibration for user's actual plan (falls back to avg/active day until isolated drops are measured)
+        var qa = period.Get("quotaAverages");
+        var p30Qa = Current.CurrentAnalytics.Get("periods").Get("30d").Get("quotaAverages");
+        var usdPer1Pct5h = qa.Number("usdPer1Pct5h") ?? p30Qa.Number("usdPer1Pct5h");
+        var calCount5h = qa.Number("usdPer1Pct5h").HasValue ? (qa.Count("calibrated5hTurns") ?? 0) : (p30Qa.Count("calibrated5hTurns") ?? 0);
+        var usdPer1PctW = qa.Number("usdPer1PctWeek") ?? p30Qa.Number("usdPer1PctWeek");
+        var avgDay = qa.Number("avgUsdPerActiveDay");
+        var activeDays = qa.Count("activeDays") ?? 0;
+
+        if (usdPer1Pct5h.HasValue)
+        {
+            QuotaRateTitle.Text = "1 % de cuota 5 h (tu plan)";
+            QuotaRateValue.Text = Money(usdPer1Pct5h);
+            QuotaRateSub.Text = $"Medido en {Number(calCount5h)} prompts aislados"
+                + (avgDay.HasValue ? $" · {Money(avgDay)}/día" : "");
+            QuotaRateCard.ToolTip = $"Calibración empírica de tu plan actual (sin asumir multiplicadores):\n"
+                + $"• 1 % de cuota 5 h ≈ {Money(usdPer1Pct5h)} equiv. API ({Number(calCount5h)} prompts aislados)"
+                + (usdPer1PctW.HasValue ? $"\n• 1 % de cuota semanal ≈ {Money(usdPer1PctW)} equiv. API" : "")
+                + (avgDay.HasValue ? $"\n• Promedio diario ({activeDays} días activos): {Money(avgDay)}" : "");
+        }
+        else
+        {
+            QuotaRateTitle.Text = "Promedio por día activo";
+            QuotaRateValue.Text = Money(avgDay);
+            QuotaRateSub.Text = activeDays > 0
+                ? $"{Number(activeDays)} {(activeDays == 1 ? "día" : "días")} con uso · calibrando $/1 %"
+                : "Sin días con uso en este período";
+            QuotaRateCard.ToolTip = "Cuando haya prompts aislados con baja de cuota medida, esta tarjeta mostrará el costo API empírico por cada 1 % de tu plan actual.";
+        }
 
         var saved = apiCost.Number("cacheSavingsUsd");
         var hitRate = apiCost.Number("cacheHitRatePct");

@@ -186,4 +186,8 @@ test('desglosa gasto por modelo×esfuerzo, promedios de cuota por turno/sesión 
   assert.ok(p24.byEffort.find(e => e.effort === 'high').multiplier > 1);
   assert.equal(p24.topChats.length, 1);
   assert.equal(p24.topChats[0].prompts, 2);
+  // Empirical calibration: total USD of t1+t2 divided by 4% total observed 5h drop
+  assert.equal(p24.quotaAverages.calibrated5hTurns, 2);
+  assert.ok(p24.quotaAverages.usdPer1Pct5h > 0);
+  assert.equal(p24.quotaAverages.activeDays, 1);
 });

@@ -121,7 +121,7 @@ function resolveReqModel(req, turn) {
   return req.model ?? (turn?.models?.length === 1 ? turn.models[0] : null) ?? 'Sin identificar';
 }
 
-function pickQuotaDelta(quotaList, minutes, provider, modelName) {
+function pickQuotaDelta(quotaList, minutes, provider, modelName, observedOnly = false) {
   if (!Array.isArray(quotaList)) return null;
   const preferredPool = provider === 'antigravity'
     ? (/claude|gpt/i.test(modelName || '') ? 'claude_gpt' : 'gemini')
@@ -129,7 +129,7 @@ function pickQuotaDelta(quotaList, minutes, provider, modelName) {
   const match = quotaList.find(q =>
     q.minutes === minutes && (preferredPool === null || q.pool === preferredPool));
   if (!match || typeof match.deltaPp !== 'number' || !Number.isFinite(match.deltaPp)) return null;
-  if (match.status !== 'observed' && match.status !== 'shared') return null;
+  if (observedOnly ? match.status !== 'observed' : (match.status !== 'observed' && match.status !== 'shared')) return null;
   return match.deltaPp;
 }
 
@@ -556,6 +556,24 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
   }));
 
   const avg = map => map.size > 0 ? Number(([...map.values()].reduce((a, b) => a + b, 0) / map.size).toFixed(3)) : null;
+
+  // Empirical calibration: USD API equivalent per 1% of quota on the user's ACTUAL plan
+  // Uses strictly isolated (`observed`) turns with positive drop and complete pricing.
+  let cal5hUsd = 0, cal5hDrop = 0, cal5hCount = 0;
+  let calWUsd = 0, calWDrop = 0, calWCount = 0;
+  const activeDayKeys = new Set();
+  for (const t of turnAggs.values()) {
+    activeDayKeys.add(localDayKey(t.time));
+    if (t.pricedSteps !== t.steps || t.usd <= 0) continue;
+    const q = turnQuotaMap?.get(t.reference);
+    if (!q) continue;
+    const obs5 = pickQuotaDelta(q, 300, provider, t.model, true);
+    if (obs5 !== null && obs5 > 0) { cal5hUsd += t.usd; cal5hDrop += obs5; cal5hCount++; }
+    const obsW = pickQuotaDelta(q, 10080, provider, t.model, true);
+    if (obsW !== null && obsW > 0) { calWUsd += t.usd; calWDrop += obsW; calWCount++; }
+  }
+
+  const activeDays = activeDayKeys.size;
   const quotaAverages = {
     avg5hPerTurnPp: avg(turnDrops5h),
     measured5hTurns: turnDrops5h.size,
@@ -568,6 +586,12 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     avgCostPerSessionUsd: sessionCount > 0 && apiCost.usd !== null ? Number((apiCost.usd / sessionCount).toFixed(4)) : null,
     avgStepsPerTurn: turnCount > 0 ? Number((summary.observedRequests / turnCount).toFixed(1)) : null,
     sessionCount,
+    activeDays,
+    avgUsdPerActiveDay: activeDays > 0 && apiCost.usd !== null ? Number((apiCost.usd / activeDays).toFixed(4)) : null,
+    usdPer1Pct5h: cal5hCount > 0 && cal5hDrop >= 0.05 ? Number((cal5hUsd / cal5hDrop).toFixed(4)) : null,
+    calibrated5hTurns: cal5hCount,
+    usdPer1PctWeek: calWCount > 0 && calWDrop >= 0.05 ? Number((calWUsd / calWDrop).toFixed(4)) : null,
+    calibratedWeekTurns: calWCount,
   };
 
   return {
