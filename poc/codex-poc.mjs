@@ -78,6 +78,7 @@ async function main() {
     const session = /^session ([a-f0-9]{16})$/.exec(line)?.[1];
     if (session && workspace) workspace.selected = session;
     else if (line !== 'sample') return;
+    if (line === 'sample' && workspace) workspace.projectRefreshAt = 0;
     pendingRefresh = true;
     delay?.abort();
   });
@@ -146,7 +147,7 @@ async function main() {
                 readProjectFolders(join(dataFolder, 'project-folders.json')),
               ]);
               workspace.projectIndex = prepareProjectIndex(catalog, salt, folders);
-              workspace.projectRefreshAt = Date.now() + 120000;
+              workspace.projectRefreshAt = Date.now() + interval * 1000;
             } catch {
               workspace.projectRefreshAt = Date.now() + 30000;
             }
@@ -155,8 +156,7 @@ async function main() {
         const requested = workspace?.selected ?? null;
         const history = await recentHistory(home, current.accountId, salt, values.details && values['question-previews'],
           workspace ? { ...workspace, projectIndex: current.accountId ? workspace.projectIndex : undefined, selected: requested } : undefined);
-        if (workspace) workspace.selected ??= history.selectedSession;
-        const until = Date.parse(current.sample.observedAt);
+        const until = Date.now();
         const since = until - hours * 3600000;
         const quotaPoints = [
           ...recordedQuotaPoints(recordings, accountScope, history),

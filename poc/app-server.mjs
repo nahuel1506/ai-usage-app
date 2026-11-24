@@ -136,7 +136,7 @@ export async function openCodex(executable, cwd, projects = false) {
         const threadParams = { currentAccountOnly: true, useStateDbOnly: true };
         const [projects, current, archived] = await Promise.all([
           list('project/list'),
-          list('thread/list', { ...threadParams, archived: false }).catch(() => []),
+          list('thread/list', { ...threadParams, archived: false }),
           list('thread/list', { ...threadParams, archived: true }).catch(() => []),
         ]);
         return { projects, threads: [...current, ...archived] };

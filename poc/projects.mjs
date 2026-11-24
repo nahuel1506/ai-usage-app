@@ -43,9 +43,11 @@ export function prepareProjectIndex(raw, salt, folders = {}) {
   const files = new Set();
   for (const item of raw.threads) {
     if (typeof item.id !== 'string') continue;
-    threads.set(item.id, { cwd: item.cwd, projectId: item.projectId, name: item.name });
+    const updatedAt = Number.isFinite(item.updatedAt) && item.updatedAt > 0 && item.updatedAt < 253402300800
+      ? new Date(item.updatedAt * 1000).toISOString() : undefined;
+    threads.set(item.id, { cwd: item.cwd, projectId: item.projectId, name: item.name, updatedAt });
     const path = projectPath(item.path);
-    if (path) files.add(path);
+    if (path) files.add(path.replace(/\.zst$/, ''));
   }
   const projectList = [...projects.values()];
   const aliases = [];

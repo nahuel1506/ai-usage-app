@@ -393,7 +393,8 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
   }
 
   if (workspace?.projectIndex && accountId) {
-    const beyondSample = files.slice(MAX_FILES).filter(file => workspace.projectIndex.files.has(projectPath(file.absolute)));
+    const beyondSample = files.slice(MAX_FILES).filter(file =>
+      workspace.projectIndex.files.has(projectPath(file.absolute)?.replace(/\.zst$/, '')));
     // Index these session headers only. Opening a session streams its body on demand.
     for (const file of beyondSample) {
       try { register(file.absolute, file.mtime, await cachedHeader(file), true); }
@@ -402,17 +403,20 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
   }
 
   const catalog = new Map();
+  let sessionCatalog = [];
   let selectedSession = null;
   if (workspace) {
     for (const file of sessionFiles.values()) {
       const entry = catalog.get(file.reference) ?? {
-        reference: file.reference, startedAt: file.startedAt || mtimeIso(file.mtime), updatedAt: mtimeIso(file.mtime), partial: false,
+        reference: file.reference, startedAt: file.startedAt || mtimeIso(file.mtime),
+        updatedAt: workspace.projectIndex?.threads.get(file.thread)?.updatedAt ?? mtimeIso(file.mtime), partial: false,
         ...sessionProject(workspace.projectIndex, file.thread, file.cwd),
       };
       entry.partial ||= file.partial;
       catalog.set(file.reference, entry);
     }
-    selectedSession = catalog.has(workspace.selected) ? workspace.selected : catalog.keys().next().value ?? null;
+    sessionCatalog = [...catalog.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    selectedSession = catalog.has(workspace.selected) ? workspace.selected : sessionCatalog[0]?.reference ?? null;
     const selectedPaths = [...sessionFiles.values()].filter(file => file.reference === selectedSession);
     const paths = new Set(selectedPaths.map(file => file.path));
     for (const path of workspace.cache.keys()) if (!paths.has(path)) workspace.cache.delete(path);
@@ -483,6 +487,6 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
     }
     snapshots.push(...result.snapshots.map(row => ({ ...row, scope: result.scope })));
   }
-  return { coverage, turns, requests, snapshots, sessionCatalog: [...catalog.values()], selectedSession,
+  return { coverage, turns, requests, snapshots, sessionCatalog, selectedSession,
     projects: workspace?.projectIndex ? workspace.projectIndex.projectList : null };
 }

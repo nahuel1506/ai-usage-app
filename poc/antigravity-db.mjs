@@ -14,7 +14,9 @@ import {
   parseTrajectoryMeta,
   parseUserPreview,
   splitModelAndEffort,
+  workspaceDisplayName,
 } from './antigravity-proto.mjs';
+import { projectPath } from './projects.mjs';
 
 const MAX_DBS = 48;
 const STEP_USER_INPUT = 14;
@@ -31,6 +33,52 @@ function addLabels(previous, next) {
 
 function defaultAntigravityHome() {
   return process.env.ANTIGRAVITY_HOME || join(homedir(), '.gemini', 'antigravity');
+}
+
+function catalogTime(value) {
+  if (typeof value !== 'string') return null;
+  const time = Date.parse(value.replace(' ', 'T'));
+  return Number.isFinite(time) ? new Date(time).toISOString() : null;
+}
+
+function workspaceKey(uri) {
+  if (typeof uri !== 'string' || !uri.trim()) return null;
+  try {
+    const url = new URL(uri.trim());
+    if (url.protocol === 'file:') {
+      const path = decodeURIComponent(url.pathname);
+      if (url.hostname) return projectPath(`//${url.hostname}${path}`);
+      if (/^\/[a-z]:\//i.test(path)) return projectPath(path.slice(1));
+      return path.replace(/\/+$/, '') || '/';
+    }
+  } catch { /* A workspace can also be stored as a path. */ }
+  return projectPath(uri.trim()) ?? uri.trim().replace(/\/+$/, '');
+}
+
+function readConversationCatalog(home, salt, includePreviews) {
+  const catalog = new Map();
+  let db;
+  try {
+    db = new DatabaseSync(join(home, 'conversation_summaries.db'), { readOnly: true });
+    const title = includePreviews ? 'title' : 'NULL AS title';
+    for (const row of db.prepare(`SELECT conversation_id, project_id, workspace_uris,
+      last_modified_time, last_user_input_time, ${title} FROM conversation_summaries`).iterate()) {
+      if (!row.conversation_id) continue;
+      let workspaceUri;
+      try {
+        const uris = JSON.parse(row.workspace_uris);
+        if (Array.isArray(uris)) workspaceUri = uris.find(uri => typeof uri === 'string' && uri.trim());
+      } catch { /* Use the conversation's workspace when available. */ }
+      catalog.set(reference(salt, 'ag-session/' + row.conversation_id), {
+        projectReference: row.project_id ? reference(salt, 'ag-native-project/' + row.project_id) : null,
+        workspaceUri,
+        updatedAt: catalogTime(row.last_modified_time) ?? catalogTime(row.last_user_input_time),
+        title: typeof row.title === 'string' ? row.title.trim().slice(0, 120) || undefined : undefined,
+      });
+    }
+  } catch { /* Older installations can be read directly from their conversation databases. */ }
+  finally { db?.close(); }
+  return catalog;
 }
 
 async function dbFingerprint(dbPath) {
@@ -93,9 +141,9 @@ export function readConversationDb(dbPath, salt, includePreviews = false, home =
     } catch { /* Optional table. */ }
 
     const sessionRef = reference(salt, 'ag-session/' + cascadeId);
-    const projectKey = meta.workspaceUri ? meta.workspaceUri.toLowerCase() : null;
+    const projectKey = workspaceKey(meta.workspaceUri);
     const projectRef = projectKey ? reference(salt, 'ag-project/' + projectKey) : '';
-    const projectName = meta.workspaceName || null;
+    const projectName = meta.workspaceName || 'Proyecto local';
 
     const turns = new Map();
     const requests = new Map();
@@ -264,7 +312,8 @@ export function readConversationDb(dbPath, salt, includePreviews = false, home =
         projectReference: projectRef,
         projectSource: projectRef ? 'antigravity' : undefined,
       },
-      project: projectRef && projectName ? { reference: projectRef, name: projectName } : null,
+      project: projectRef ? { reference: projectRef, name: projectName } : null,
+      workspaceUri: meta.workspaceUri,
       turns,
       requests,
       malformed,
@@ -296,16 +345,12 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
   }
 
   files.sort((a, b) => b.mtime - a.mtime);
+  const catalog = readConversationCatalog(home, salt, includePreviews);
   const topFiles = files.slice(0, MAX_DBS);
-  const snapshotKey = `${includePreviews ? 1 : 0}|${skipped}|${unavailableRoots}|` +
-    topFiles.map(f => `${f.path}:${f.mainMtime}:${f.size}:${f.ino}:${f.walMtime}:${f.walSize}`).join(';');
-  if (workspace?.snapshotCache && workspace.snapshotCache.key === snapshotKey) {
-    const cachedSnap = workspace.snapshotCache.value;
-    const selectedSession = cachedSnap.sessionCatalog.some(s => s.reference === workspace.selected)
-      ? workspace.selected
-      : cachedSnap.sessionCatalog[0]?.reference ?? null;
-    return { ...cachedSnap, selectedSession };
-  }
+  const wanted = workspace?.selected ?? [...catalog].sort((a, b) => (b[1].updatedAt ?? '').localeCompare(a[1].updatedAt ?? ''))[0]?.[0];
+  const selectedFile = wanted && files.slice(MAX_DBS).find(file =>
+    reference(salt, 'ag-session/' + basename(file.path, '.db')) === wanted);
+  if (selectedFile) topFiles.push(selectedFile);
 
   const cache = workspace?.dbCache;
   if (cache) {
@@ -328,10 +373,9 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
 
   const turns = new Map();
   const requests = new Map();
-  const projectsMap = new Map();
-  const sessionCatalog = [];
+  const sessions = new Map();
 
-  for (const file of files.slice(0, MAX_DBS)) {
+  for (const file of topFiles) {
     let parsed = null;
     const cached = cache?.get(file.path);
     if (cached && cached.mainMtime === file.mainMtime && cached.size === file.size
@@ -359,16 +403,13 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
     coverage.sameAccountFiles++;
     coverage.malformedLines += parsed.malformed;
 
-    const sessionEntry = {
+    sessions.set(parsed.session.reference, {
       ...parsed.session,
       startedAt: parsed.session.startedAt ?? new Date(file.mtime).toISOString(),
       updatedAt: parsed.session.updatedAt ?? new Date(file.mtime).toISOString(),
-    };
-    sessionCatalog.push(sessionEntry);
-
-    if (parsed.project && !projectsMap.has(parsed.project.reference)) {
-      projectsMap.set(parsed.project.reference, parsed.project);
-    }
+      workspaceUri: parsed.workspaceUri,
+      projectName: parsed.project?.name,
+    });
 
     for (const [key, turn] of parsed.turns) {
       turns.set(key, turn);
@@ -378,12 +419,36 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
     }
   }
 
-  sessionCatalog.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+  for (const ref of catalog.keys()) {
+    if (!sessions.has(ref)) sessions.set(ref, { reference: ref, partial: true });
+  }
+  const projectsMap = new Map();
+  const sessionCatalog = [...sessions.values()].map(({ workspaceUri, projectName, ...session }) => {
+    const summary = catalog.get(session.reference);
+    const folder = summary?.workspaceUri ?? workspaceUri;
+    const folderKey = workspaceKey(folder);
+    const projectReference = summary?.projectReference ??
+      (folderKey ? reference(salt, 'ag-project/' + folderKey) : '');
+    return {
+      ...session,
+      nativeTitle: summary?.title ?? session.nativeTitle,
+      updatedAt: [summary?.updatedAt, session.updatedAt].filter(Boolean).sort().at(-1),
+      projectReference,
+      projectSource: projectReference ? 'antigravity' : undefined,
+      projectName: workspaceDisplayName(summary?.workspaceUri) ?? projectName ?? workspaceDisplayName(folder),
+    };
+  }).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))
+    .map(({ projectName, ...session }) => {
+      if (session.projectReference && !projectsMap.get(session.projectReference)?.name)
+        projectsMap.set(session.projectReference, { reference: session.projectReference, name: projectName });
+      return session;
+    });
   const selectedSession = workspace && sessionCatalog.some(s => s.reference === workspace.selected)
     ? workspace.selected
     : sessionCatalog[0]?.reference ?? null;
 
-  const projects = [...projectsMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  const projects = [...projectsMap.values()].map(project => ({ ...project, name: project.name ?? 'Proyecto de Antigravity' }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'es'));
 
   const result = {
     coverage,
@@ -394,8 +459,5 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
     selectedSession,
     projects,
   };
-  if (workspace) {
-    workspace.snapshotCache = { key: snapshotKey, value: result };
-  }
   return result;
 }

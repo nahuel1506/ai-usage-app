@@ -148,6 +148,28 @@ test('lee SQLite de Antigravity, agrupa turnos por turn_id, deduplica llamadas y
     const hist2 = await recentAntigravityHistory(root, salt, true, workspace);
     assert.equal(hist2.requests.size, 2);
     assert.equal(hist2.sessionCatalog[0].reference, hist1.sessionCatalog[0].reference);
+
+    const summaries = new DatabaseSync(join(root, 'conversation_summaries.db'));
+    try {
+      summaries.exec(`CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY,
+        project_id TEXT, workspace_uris TEXT, last_modified_time TEXT, last_user_input_time TEXT, title TEXT)`);
+      const insert = summaries.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, NULL, ?)');
+      insert.run('cascade-1', 'native-project', '["file:///c:/dev/demo-repo"]', '2026-11-23 10:00:00+00:00', 'Primer chat');
+      insert.run('cascade-2', 'native-project', '["file:///c:/dev/another-folder"]', '2026-11-24 10:00:00+00:00', 'Chat reciente');
+      const hist3 = await recentAntigravityHistory(root, salt, true, workspace);
+      assert.equal(hist3.projects.length, 1);
+      assert.deepEqual(hist3.sessionCatalog.map(s => s.nativeTitle), ['Chat reciente', 'Primer chat']);
+      assert.equal(hist3.selectedSession, hist3.sessionCatalog[0].reference);
+      assert.equal(hist3.sessionCatalog[0].partial, true);
+      assert.equal(hist3.sessionCatalog[0].projectReference, hist3.sessionCatalog[1].projectReference);
+
+      summaries.exec("UPDATE conversation_summaries SET project_id = 'moved-project' WHERE conversation_id = 'cascade-1'");
+      const hist4 = await recentAntigravityHistory(root, salt, true, workspace);
+      assert.equal(hist4.projects.length, 2);
+      assert.notEqual(hist4.sessionCatalog[0].projectReference, hist4.sessionCatalog[1].projectReference);
+    } finally {
+      summaries.close();
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

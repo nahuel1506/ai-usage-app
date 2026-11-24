@@ -184,6 +184,92 @@ test('usa la lectura posterior anterior a la siguiente pregunta cuando está dis
   assert.equal(short.deltaPp, 2);
 });
 
+test('actualiza la baja cuando aparece una lectura posterior a la consulta oficial', () => {
+  const live = liveQuotaPoints([sample(22, row(11, at(600)))], 'test-account');
+  const [impact] = impactFixture({
+    live, snapshots: add => [add(8, 9), add(24, 12)],
+  });
+  assert.equal(impact.after.at, at(24));
+  assert.equal(impact.deltaPp, 3);
+});
+
+test('Antigravity conserva la baja neta aunque fluctúen lecturas oficiales de la misma ventana', () => {
+  const agy = { source: 'agy-cli' };
+  const [impact] = impactFixture({ snapshots: add => [
+    add(8, 36.4808, agy), add(13, 35.6112, agy), add(21, 41.3108, agy),
+  ] });
+  assert.equal(impact.status, 'observed');
+  assert.equal(impact.deltaPp, 4.83);
+  assert.equal(impact.fluctuated, true);
+
+  const [reset] = impactFixture({ snapshots: add => [
+    add(8, 36.4808, agy), add(13, 35.6112, agy), add(21, 41.3108, { ...agy, resetsAt: at(900) }),
+  ] });
+  assert.equal(reset.status, 'discontinuity');
+  assert.equal(reset.deltaPp, null);
+});
+
+test('si ya empezó otra pregunta, usa la lectura posterior más cercana al cierre', () => {
+  const live = liveQuotaPoints([
+    sample(23, row(12, at(600))), sample(26, row(16, at(600))),
+  ], 'test-account');
+  const [impact] = impactFixture({
+    live, snapshots: add => [add(8, 9)],
+    others: [{ key: 'b', started: Date.parse(at(21)), ended: Date.parse(at(27)) }],
+  });
+  assert.equal(impact.after.at, at(23));
+  assert.equal(impact.status, 'shared');
+  assert.equal(impact.deltaPp, 3);
+});
+
+test('resume bloques de 5 horas y semanas reales por chat, sin duplicar bajas compartidas ni reinicios', () => {
+  const turn = (key, started, ended, session = 'chat-a', composer = true) => ({
+    key, session, composer, scope: 'same', started: Date.parse(at(started)), ended: Date.parse(at(ended)),
+    first: Date.parse(at(started + 1)), last: Date.parse(at(ended - 1)),
+  });
+  const turns = [
+    turn('first', 100, 120),
+    turn('shared', 700, 730),
+    turn('other-chat', 715, 750, 'chat-b'),
+    turn('crosses-reset', 17990, 18015),
+    turn('automatic', 18200, 18220, 'chat-a', false),
+    turn('next-week', 32000, 32020),
+    turn('idle-short-window', 36100, 36120),
+  ];
+  const snapshots = [
+    [95,     0, 18000, 10], [125,   70, 18001, 20],
+    [695,   70, 18000, 20], [735,   98, 18001, 40],
+    [17985, 98, 18000, 55], [17995, 99, 18001, 56],
+    [18002,  1, 36000, 57], [18020,  3, 36000, 58],
+    [18195,  3, 36000, 58], [18225, 24, 36000, 62],
+    [31995, 25, 36000,  1], [32025, 30, 36000,  4],
+    [36095,  0, 54095,  4], [36125,  0, 54125,  6],
+  ].flatMap(([time, short, reset, weekly]) => [
+    row(short, at(reset)),
+    { ...row(weekly, at(time < 30000 ? 30500 : 634800)), minutes: 10080 },
+  ].map(window => ({ ...window, time: Date.parse(at(time)), scope: 'same', source: 'rollout' })));
+  const history = {
+    selectedSession: 'chat-a', sessionCatalog: [{ reference: 'chat-a' }], snapshots,
+    turns: new Map(turns.map(t => [t.key, t])),
+    requests: new Map(turns.map(t => [t.key, { turn: t.key, time: t.last, scope: 'same', usage: { input_tokens: 1 } }])),
+  };
+  const { sessionQuotaHistory: summary } = interactionSummary(history, Date.parse(at(300)), Date.parse(at(37000)), [], true);
+  assert.deepEqual(summary.blocks.map(block => [
+    block.startsAt, block.resetsAt, block.short.deltaPp, block.short.measured, block.short.partial,
+    block.weekly.map(part => part.deltaPp),
+  ]), [
+    [at(18000), at(36000), 28, 3, 1, [5, 3]],
+    [at(0), at(18000), 71, 2, 1, [11]],
+  ]);
+  assert.deepEqual(summary.weeks.map(week => [week.active, week.deltaPp]), [[true, 5], [false, 17]]);
+  assert.equal(summary.weeks[1].endsAt, summary.weeks[0].startsAt);
+
+  const buckets = [{ pool: 'gemini', minutes: 300 }, { pool: 'gemini', minutes: 10080 }, { pool: 'claude_gpt', minutes: 300 }];
+  const agHistory = { ...history, snapshots: snapshots.map(point => ({ ...point, pool: 'gemini' })) };
+  const ag = interactionSummary(agHistory, 0, Date.parse(at(37000)), [], true, { buckets });
+  assert.deepEqual(ag.sessionQuotaHistory.blocks.map(block => [block.pool, block.short.deltaPp]), [['gemini', 28], ['gemini', 71]]);
+});
+
 
 test('una pregunta agrupa llamadas propias y delegadas sin convertirlas en otros envíos', () => {
   const line = (type, seconds, payload) => JSON.stringify({ type, timestamp: at(seconds), payload });
@@ -286,6 +372,15 @@ test('la sesión elegida recupera mensajes fuera de la cola, procesa anexos y se
     assert.equal(switched.selectedSession, opts.selected);
     assert.equal(switched.observedQuestions, 1);
     assert.equal(switched.turns[0].sentAt, at(-100));
+
+    opts.selected = null;
+    opts.projectIndex = prepareProjectIndex({ projects: [], threads: [
+      { id: 'active', updatedAt: Date.parse(at(15)) / 1000 },
+      { id: 'archive', updatedAt: Date.parse(at(20)) / 1000 },
+    ] }, Buffer.alloc(32));
+    const ordered = await collect();
+    assert.equal(ordered.sessions[0].reference, switched.selectedSession);
+    assert.equal(ordered.selectedSession, switched.selectedSession);
   } finally {
     await rm(join(home, 'sessions', 'rollout-first.jsonl'), { force: true });
     await rm(join(home, 'archived_sessions', 'rollout-second.jsonl.zst'), { force: true });

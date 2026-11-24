@@ -242,8 +242,6 @@ async function main() {
             workspace,
           ),
         ]);
-        workspace.selected ??= history.selectedSession;
-
         let quotaSample;
         if (agyResult && agyResult.windows.length > 0) {
           quotaSample = agyResult;
@@ -260,7 +258,7 @@ async function main() {
           };
         }
 
-        const until = Date.parse(quotaSample.observedAt);
+        const until = Date.now();
         const since = until - hours * 3_600_000;
         const quotaPoints = toQuotaPoints([...recordedHistory, ...liveRecords]);
 

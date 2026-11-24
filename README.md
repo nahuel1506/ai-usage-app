@@ -16,10 +16,10 @@ Aplicación de escritorio **local-first** para Windows que monitorea en vivo el 
   - **Sincronización automática cada 24 h** del catálogo público de precios en segundo plano, con tarifas oficiales fechadas como base prioritaria.
 - **Dashboard orientado a decisiones (sin métricas de relleno):**
   - **Terminología unificada (`Chat → Prompt → Pasos del modelo`):** distingue claramente un chat, tus prompts (y ejecuciones automáticas) y cada paso del modelo (`1.º paso`, `Iteración`, `Subagente`), con glosario integrado.
-  - **Resumen:** cuotas en vivo con cuenta regresiva y **autonomía estimada** (*«~N prompts restantes al ritmo actual»*), selector `24 h / 7 días / 30 días`, **calibración empírica por 1 % de cuota** (medida sobre tu plan real sin asumir multiplicadores fijos), ahorro por caché, **Top 5 prompts más costosos**, **gasto por modelo expandible por nivel de razonamiento**, **chats más pesados** (alerta en `>200k`), tendencia diaria (7 d / 30 d) y evolución de cuota.
-  - **Prompts:** filtros por proyecto, chat, búsqueda, ventana de cuota y origen (`Mis prompts` / `Automáticos`); **comparativa de modelos y esfuerzos dentro del mismo chat**; inspector con chips y tabla paso por paso.
-  - **Análisis:** promedios de cuota (`5 h` y `Semanal`) y costo por chat y por prompt, **impacto del tamaño de chat** (`<50k` a `>250k`, para saber cuándo abrir un chat nuevo), **comparativa directa de esfuerzo** (`Low` vs `Medium` vs `High` vs `XHigh`) y tabla comparativa `Modelo × Esfuerzo`.
-  - **Historial y Fuentes:** tabla con delta (`Δ 5 h`), salud de fuentes y estado del catálogo de tarifas.
+  - **Resumen:** cuota disponible, reinicios, autonomía estimada y evolución de la cuota.
+  - **Prompts:** selectores de proyecto y chat compartidos por tres pestañas. **Preguntas** conserva los filtros, el orden y el detalle de cada prompt. **Cuota del chat** reúne el acumulado semanal y los bloques de 5 horas. **Modelos** compara el uso por modelo y esfuerzo del chat.
+  - **Análisis:** filtro de `24 h / 7 días / 30 días`, promedios de cuota y costo. Los gráficos y tablas se agrupan en **Tamaño del chat y esfuerzo**, **Modelos y esfuerzo** y **Costos y actividad**. Este último incluye la calibración por 1 % de cuota, ahorro por caché, rankings y tendencia diaria.
+  - **Historial y Fuentes:** evolución y registro de cuota. Fuentes incluye información de cobertura y tarifas, acceso a las grabaciones y el glosario.
   - **Tema claro y oscuro:** detecta automáticamente la preferencia de Windows y permite alternar con un clic.
 
 ## Requisitos

@@ -1,4 +1,4 @@
-import { interactionQuota, quotaObservations } from './interaction-quota.mjs';
+import { interactionQuota, quotaObservations, sessionQuotaHistory } from './interaction-quota.mjs';
 import { aggregateCosts, priceRequest, pricingCatalogStatus } from './pricing.mjs';
 
 function bucket(row) {
@@ -706,6 +706,7 @@ function interactionGroups(history, since, until) {
 export function interactionSummary(history, since, until, live = [], bySession = false, quotaOptions = undefined) {
   const provider = quotaOptions?.provider ?? (quotaOptions?.buckets ? 'antigravity' : 'codex');
   const series = quotaObservations(history, live, until, quotaOptions);
+  const quotaTurns = [];
   const interactions = interactionGroups(history, bySession ? -Infinity : since, until).flatMap(({ reference, members, requests }) => {
     requests.sort((left, right) => left.time - right.time);
     const turn = history.turns.get(reference);
@@ -769,13 +770,12 @@ export function interactionSummary(history, since, until, live = [], bySession =
         };
       }),
     };
-    return [{
-      ...detail,
-      quota: interactionQuota(series, {
-        reference, members, startedAt: detail.startedAt, endedAt: detail.endedAt,
-        firstRequest: firstActivity, lastRequest: lastActivity,
-      }, history),
-    }];
+    const quotaTurn = {
+      reference, members, startedAt: detail.sentAt ?? detail.startedAt, endedAt: detail.endedAt,
+      firstRequest: firstActivity, lastRequest: lastActivity,
+    };
+    if (bySession) quotaTurns.push(quotaTurn);
+    return [{ ...detail, quota: interactionQuota(series, quotaTurn, history) }];
   });
   interactions.sort((left, right) => (right.sentAt ?? right.lastRequestAt).localeCompare(left.sentAt ?? left.lastRequestAt));
   const questions = interactions.filter(row => row.kind === 'question');
@@ -799,6 +799,7 @@ export function interactionSummary(history, since, until, live = [], bySession =
     projects: bySession ? history.projects : undefined,
     selectedSession: bySession ? history.selectedSession : undefined,
     sessionModelComparison,
+    sessionQuotaHistory: bySession && history.selectedSession ? sessionQuotaHistory(series, quotaTurns, history, until) : undefined,
   };
 }
 

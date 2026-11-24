@@ -127,20 +127,31 @@ function lowerBound(samples, time) {
   return low;
 }
 
+function latestReading(samples) {
+  const latest = samples.at(-1);
+  if (!latest) return undefined;
+  // The series places official account readings first at a given timestamp.
+  return samples[lowerBound(samples, latest.time)];
+}
+
+function turnBounds(turn) {
+  const start = turn.startedAt ? Date.parse(turn.startedAt) : turn.firstRequest;
+  const end = turn.endedAt ? Math.max(Date.parse(turn.endedAt), turn.lastRequest) : turn.lastRequest;
+  return { start, end };
+}
+
 function measureWindow(minutes, samples, turn, turnIndex, pool = null) {
   const members = turn.members ?? new Set([turn.reference]);
-  const start = turn.startedAt ? Date.parse(turn.startedAt) : turn.firstRequest;
-  const end = turn.endedAt ? Date.parse(turn.endedAt) : turn.lastRequest;
+  const { start, end } = turnBounds(turn);
   const relevant = samples.slice(lowerBound(samples, start - BEFORE_MS), lowerBound(samples, end + AFTER_MS + 1));
-  const before = relevant.findLast(row => row.time <= start);
+  const before = latestReading(relevant.slice(0, lowerBound(relevant, start + 1)));
   const afterEnd = relevant.filter(row => row.time >= end);
   const nextStart = findNextStart(turnIndex, members, end);
   const beforeNext = afterEnd.filter(row => row.time < nextStart);
-  const eligible = beforeNext.length ? beforeNext : afterEnd;
-  const after = eligible.findLast(row => row.source === 'app-server' || row.source === 'agy-cli') ?? eligible[0];
+  const after = latestReading(beforeNext) ?? afterEnd[0];
   const inside = relevant.filter(row => row.time >= start && row.time <= end);
   const left = before ?? inside[0];
-  const right = after ?? inside.at(-1);
+  const right = after ?? latestReading(inside);
   const result = {
     ...(pool ? { pool } : {}),
     minutes, status: 'unavailable', deltaPp: null, before: left ? point(left) : null,
@@ -152,12 +163,17 @@ function measureWindow(minutes, samples, turn, turnIndex, pool = null) {
 
   const reset = Date.parse(left.resetsAt);
   const usedBySource = new Map();
-  const interval = relevant.filter(row => row.time >= left.time && row.time <= right.time);
+  const agyEndpoints = left.source === 'agy-cli' && right.source === 'agy-cli';
+  const interval = relevant.filter(row => row.time >= left.time && row.time <= right.time &&
+    (!agyEndpoints || row.source === 'agy-cli'));
+  let fluctuated = false;
   if (right.usedPercent < left.usedPercent || interval.some(row => {
     const nextReset = Date.parse(row.resetsAt);
+    const decreased = row.usedPercent < (usedBySource.get(row.source) ?? -Infinity);
+    fluctuated ||= decreased;
     const differs = !Number.isFinite(reset) || !Number.isFinite(nextReset) ||
       Math.abs(nextReset - reset) > 2000 || nextReset <= right.time ||
-      (left.plan && row.plan && left.plan !== row.plan) || row.usedPercent < (usedBySource.get(row.source) ?? -Infinity);
+      (left.plan && row.plan && left.plan !== row.plan) || (decreased && !agyEndpoints);
     usedBySource.set(row.source, row.usedPercent);
     return differs;
   })) return { ...result, status: 'discontinuity' };
@@ -165,7 +181,7 @@ function measureWindow(minutes, samples, turn, turnIndex, pool = null) {
   const deltaPp = Number((right.usedPercent - left.usedPercent).toFixed(6));
   const otherTurns = overlappingTurns(turnIndex, members, left.time, right.time);
   const status = !result.hasStart || !result.hasEnd ? 'partial' : otherTurns ? 'shared' : 'observed';
-  return { ...result, status, deltaPp, otherTurns };
+  return { ...result, status, deltaPp, otherTurns, ...(fluctuated ? { fluctuated: true } : {}) };
 }
 
 export function interactionQuota(series, turn, history) {
@@ -174,4 +190,108 @@ export function interactionQuota(series, turn, history) {
     Array.isArray(value)
       ? measureWindow(key, value, turn, turnIndex)
       : measureWindow(value.minutes, value.samples, turn, turnIndex, value.pool));
+}
+
+function quotaPeriods(samples, minutes) {
+  const duration = minutes * 60_000;
+  const readings = samples.flatMap(sample => {
+    const reset = Date.parse(sample.resetsAt);
+    return sample.time >= reset - duration - 2000 && sample.time < reset ? [{ sample, reset }] : [];
+  });
+  const resets = [...new Set(readings
+    .filter(({ sample }) => minutes !== 300 || sample.usedPercent > 0)
+    .map(({ reset }) => reset))].sort((a, b) => a - b);
+  const periods = [];
+  for (const reset of resets) {
+    // The provider can report the same reset a second or two apart.
+    if (reset - (periods.at(-1)?.time ?? -Infinity) > 2000)
+      periods.push({ time: reset, start: reset - duration, end: reset, samples: [] });
+  }
+  for (const { sample, reset } of readings) {
+    const period = periods[lowerBound(periods, reset - 2000)];
+    if (period && period.time <= reset + 2000 && sample.time >= period.start && sample.time < period.time)
+      period.samples.push(sample);
+  }
+  const confirmed = periods.filter(period => period.samples.some(sample => sample.usedPercent > 0) ||
+    (minutes !== 300 && (period.samples.at(-1)?.time - period.samples[0]?.time) > 2000));
+  for (let index = 1; index < confirmed.length; index++) {
+    const previous = confirmed[index - 1];
+    const next = confirmed[index];
+    if (previous.end <= next.start) continue;
+    // When the provider changes the schedule early, use the new nominal start
+    // unless we still have readings of the older window after that time.
+    const lastPrevious = previous.samples.at(-1).time;
+    const firstNext = next.samples[0].time;
+    next.start = Math.max(next.start, Math.min(lastPrevious + 1, firstNext));
+    previous.end = Math.min(previous.end, next.start);
+  }
+  return confirmed;
+}
+
+function periodTotal(minutes, period, turns, turnIndex, from = period.start, to = period.end) {
+  const active = turns.filter(turn => turn.end >= from && turn.start < to);
+  const samples = period.samples.slice(lowerBound(period.samples, from), lowerBound(period.samples, to));
+  const intervals = active.flatMap(turn => {
+    const impact = measureWindow(minutes, samples, turn, turnIndex);
+    if (!Number.isFinite(impact.deltaPp) || impact.otherTurns) return [];
+    return [{
+      start: Date.parse(impact.before.at), end: Date.parse(impact.after.at),
+      delta: impact.deltaPp, partial: impact.status === 'partial',
+    }];
+  }).sort((a, b) => a.start - b.start);
+
+  // A boundary reading can be shared. A span of consumption cannot.
+  const overlapping = new Set();
+  let furthest = null;
+  for (const interval of intervals) {
+    if (furthest && interval.start < furthest.end) {
+      overlapping.add(furthest);
+      overlapping.add(interval);
+    }
+    if (!furthest || interval.end > furthest.end) furthest = interval;
+  }
+  const measured = intervals.filter(interval => !overlapping.has(interval));
+  return {
+    activities: active.length, measured: measured.length,
+    partial: measured.filter(interval => interval.partial).length,
+    deltaPp: measured.length ? Number(measured.reduce((sum, interval) => sum + interval.delta, 0).toFixed(6)) : null,
+  };
+}
+
+export function sessionQuotaHistory(series, quotaTurns, history, until) {
+  const turns = quotaTurns.map(turn => ({ ...turn, ...turnBounds(turn) }));
+  const turnIndex = getTurnIndex(history.turns);
+  const pools = new Map();
+  for (const [key, value] of series) {
+    const { pool = 'codex', minutes, samples } = Array.isArray(value) ? { minutes: key, samples: value } : value;
+    if (!pools.has(pool)) pools.set(pool, new Map());
+    pools.get(pool).set(minutes, quotaPeriods(samples, minutes));
+  }
+
+  const weeks = [];
+  const blocks = [];
+  const dates = (pool, period) => ({
+    pool, startsAt: new Date(period.start).toISOString(), endsAt: new Date(period.end).toISOString(),
+    resetsAt: new Date(period.time).toISOString(), active: period.start <= until && period.end > until,
+  });
+  for (const [pool, windows] of pools) {
+    const weekly = windows.get(10080) ?? [];
+    for (const period of weekly) {
+      const total = periodTotal(10080, period, turns, turnIndex);
+      const range = dates(pool, period);
+      if (total.activities || range.active) weeks.push({ ...range, ...total });
+    }
+    for (const period of windows.get(300) ?? []) {
+      const short = periodTotal(300, period, turns, turnIndex);
+      if (!short.activities) continue;
+      const weeklyParts = weekly.filter(week => week.start < period.end && week.end > period.start).map(week => ({
+        resetsAt: new Date(week.time).toISOString(),
+        ...periodTotal(10080, week, turns, turnIndex, Math.max(week.start, period.start), Math.min(week.end, period.end)),
+      }));
+      blocks.push({ ...dates(pool, period), short, weekly: weeklyParts });
+    }
+  }
+  weeks.sort((a, b) => b.startsAt.localeCompare(a.startsAt));
+  blocks.sort((a, b) => b.startsAt.localeCompare(a.startsAt));
+  return { weeks, blocks };
 }

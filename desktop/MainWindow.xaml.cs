@@ -15,10 +15,6 @@ public partial class MainWindow : Window
     private static readonly SolidColorBrush Online = FrozenBrush("#16A34A");
     private static readonly SolidColorBrush MutedDot = FrozenBrush("#65738A");
     private static readonly SolidColorBrush Amber = FrozenBrush("#D97706");
-    private static readonly SolidColorBrush CodexAccentLight = FrozenBrush("#0D9488");
-    private static readonly SolidColorBrush CodexAccentDark = FrozenBrush("#34D399");
-    private static readonly SolidColorBrush AgAccentLight = FrozenBrush("#4F46E5");
-    private static readonly SolidColorBrush AgAccentDark = FrozenBrush("#818CF8");
 
     private readonly Dictionary<ProviderKind, ProviderState> providers = new()
     {
@@ -66,7 +62,7 @@ public partial class MainWindow : Window
         ApplyTheme(!isDarkTheme);
         UpdatePeriodButtons();
         UpdateMetricButtons();
-        RenderOverviewAnalytics();
+        RenderCostAnalytics();
         RenderAnalyticsPage();
         RenderSessionComparison();
         DrawVisibleCharts();
@@ -76,7 +72,7 @@ public partial class MainWindow : Window
     {
         isDarkTheme = dark;
         ThemeManager.Apply(dark);
-        ThemeButton.Content = dark ? "Cambiar a tema claro" : "Cambiar a tema oscuro";
+        ThemeButton.Content = dark ? "Tema claro" : "Tema oscuro";
         UpdateProviderChrome();
     }
 
@@ -152,18 +148,13 @@ public partial class MainWindow : Window
         CodexProviderButton.BorderBrush = FrozenBrush(isCodex ? "#6366F1" : "#1D283D");
         AntigravityProviderButton.Background = FrozenBrush(!isCodex ? "#1E2A45" : "#111827");
         AntigravityProviderButton.BorderBrush = FrozenBrush(!isCodex ? "#6366F1" : "#1D283D");
-
-        ProviderBadgeText.Text = isCodex ? "Codex" : "Antigravity";
-        ProviderBadgeText.Foreground = isCodex
-            ? (isDarkTheme ? CodexAccentDark : CodexAccentLight)
-            : (isDarkTheme ? AgAccentDark : AgAccentLight);
     }
 
     private void UpdateProviderLabels()
     {
         var isCodex = activeProvider == ProviderKind.Codex;
-        ShortQuotaTitle.Text = isCodex ? "Ventana de 5 horas" : "Gemini · 5 horas";
-        WeekQuotaTitle.Text = isCodex ? "Ventana semanal" : "Gemini · Semanal";
+        ShortQuotaTitle.Text = isCodex ? "5 horas" : "Gemini · 5 horas";
+        WeekQuotaTitle.Text = isCodex ? "Semanal" : "Gemini · Semanal";
         AltQuotaCard1.Visibility = isCodex ? Visibility.Collapsed : Visibility.Visible;
         AltQuotaCard2.Visibility = isCodex ? Visibility.Collapsed : Visibility.Visible;
         QuotaStrip.Columns = isCodex ? 2 : 4;
@@ -188,7 +179,8 @@ public partial class MainWindow : Window
 
     private void ClearProviderView()
     {
-        ProviderDetail.Text = activeProvider == ProviderKind.Codex ? "Conectando con Codex…" : "Leyendo Antigravity…";
+        ProviderDetail.Text = "";
+        ProviderDetail.ToolTip = null;
         ShortQuota.Text = WeekQuota.Text = AltShortQuota.Text = AltWeekQuota.Text = "—";
         ShortBar.Value = WeekBar.Value = AltShortBar.Value = AltWeekBar.Value = 0;
         ShortReset.Text = WeekReset.Text = AltShortReset.Text = AltWeekReset.Text = "Sin datos";
@@ -197,7 +189,12 @@ public partial class MainWindow : Window
         CacheHitRateLabel.Text = "";
         CacheHitBar.Value = 0;
         InteractionsGrid.ItemsSource = null;
+        InteractionCoverage.Text = "";
         InteractionDetail.Visibility = Visibility.Collapsed;
+        SessionQuotaCard.Visibility = Visibility.Collapsed;
+        SessionComparisonCard.Visibility = Visibility.Collapsed;
+        SessionComparisonEmpty.Visibility = Visibility.Collapsed;
+        SetChatStatus("Buscando chats…");
     }
 
     private void SelectPeriod(object sender, RoutedEventArgs e)
@@ -206,7 +203,7 @@ public partial class MainWindow : Window
         if (period == activePeriod) return;
         activePeriod = period;
         UpdatePeriodButtons();
-        RenderOverviewAnalytics();
+        RenderCostAnalytics();
         RenderAnalyticsPage();
     }
 
@@ -214,7 +211,7 @@ public partial class MainWindow : Window
     {
         var activeBg = (Brush)Application.Current.Resources["AccentPrimary"];
         var mutedFg = (Brush)Application.Current.Resources["TextMuted"];
-        foreach (var btn in new[] { Period24hBtn, Period7dBtn, Period30dBtn, AnPeriod24hBtn, AnPeriod7dBtn, AnPeriod30dBtn })
+        foreach (var btn in new[] { AnPeriod24hBtn, AnPeriod7dBtn, AnPeriod30dBtn })
         {
             var selected = Equals(btn.Tag, activePeriod);
             btn.Background = selected ? activeBg : Brushes.Transparent;
@@ -319,7 +316,7 @@ public partial class MainWindow : Window
                         Display(state, sample);
                     }
                     if (!state.Stopping)
-                        SetProviderStatus(state, watch ? $"En vivo · cada {Collector.IntervalSeconds} s" : "Actualizado", Online);
+                        SetProviderStatus(state, watch ? "En vivo" : "Actualizado", Online);
                 }
                 else if (root.Text("type") == "collection-error" && !state.Stopping)
                 {
@@ -426,6 +423,7 @@ public partial class MainWindow : Window
     private void SetStatusDisplay(string message, Brush color)
     {
         Status.Text = message;
+        Status.ToolTip = message == "En vivo" ? $"Consulta automática cada {Collector.IntervalSeconds} s" : null;
         StatusDot.Fill = color;
     }
 
@@ -436,7 +434,8 @@ public partial class MainWindow : Window
         var label = isCodex
             ? (string.IsNullOrEmpty(plan) ? "Codex" : "Codex · " + Locale.TextInfo.ToTitleCase(plan))
             : "Antigravity · SQLite + agy CLI";
-        ProviderDetail.Text = $"{label} · Actualizado {ClockTime(sample.At)}";
+        ProviderDetail.Text = $"· {ClockTime(sample.At)}";
+        ProviderDetail.ToolTip = $"{label} · Última lectura {LocalTime(sample.At)}";
 
         if (isCodex)
         {
@@ -453,8 +452,11 @@ public partial class MainWindow : Window
 
         UpdateAutonomyEstimates(state, sample);
         UpdateSourcesView(state, sample);
-        RenderOverviewAnalytics();
-        if (AnalyticsPanel.Visibility == Visibility.Visible) RenderAnalyticsPage();
+        if (AnalyticsPanel.IsVisible)
+        {
+            RenderCostAnalytics();
+            RenderAnalyticsPage();
+        }
         DisplayInteractions(state, sample.Root);
     }
 
@@ -470,7 +472,7 @@ public partial class MainWindow : Window
         if (left5h.HasValue && avg5h is > 0.01)
         {
             var est = (int)Math.Floor(left5h.Value / avg5h.Value);
-            ShortAutonomy.Text = $"~{Number(est)} prompts restantes al ritmo actual";
+            ShortAutonomy.Text = $"≈ {Number(est)} prompts restantes";
             ShortAutonomy.ToolTip = $"Calculado con tu baja promedio real ({Percent(avg5h)}/prompt en {p30.Count("measured5hTurns")} prompts medidos).";
             ShortAutonomy.Visibility = Visibility.Visible;
         }
@@ -479,7 +481,7 @@ public partial class MainWindow : Window
         if (leftWeek.HasValue && avgWeek is > 0.01)
         {
             var est = (int)Math.Floor(leftWeek.Value / avgWeek.Value);
-            WeekAutonomy.Text = $"~{Number(est)} prompts restantes en la semana";
+            WeekAutonomy.Text = $"≈ {Number(est)} prompts restantes";
             WeekAutonomy.ToolTip = $"Calculado con tu baja promedio semanal ({Percent(avgWeek)}/prompt en {p30.Count("measuredWeekTurns")} prompts medidos).";
             WeekAutonomy.Visibility = Visibility.Visible;
         }
@@ -495,10 +497,6 @@ public partial class MainWindow : Window
         var tokenRecords = sample.Root.Get("tokenRecords");
         var requestCount = tokenRecords.Get("sameAccount").Count("observedRequests");
         var unverified = tokenRecords.Get("unverifiedAccount").Count("observedRequests");
-
-        CoverageHint.Text = isCodex
-            ? $"Cobertura local: {Number(read)}/{Number(discovered)} archivos de chats verificados"
-            : $"Cobertura local: {Number(read)}/{Number(discovered)} bases SQLite de chats";
 
         var catalog = state.CurrentAnalytics.Get("catalog");
         var syncedAt = catalog.Date("syncedAt");
@@ -544,7 +542,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RenderOverviewAnalytics()
+    private void RenderCostAnalytics()
     {
         var period = Current.CurrentAnalytics.Get("periods").Get(activePeriod);
         if (period.ValueKind != JsonValueKind.Object)
@@ -610,7 +608,7 @@ public partial class MainWindow : Window
         PaceSub.Text = $"{Number(prompts)} prompts · {avgSteps?.ToString("0.#", Locale) ?? "—"} pasos/prompt ({Number(steps)} pasos)";
 
         ChartRenderer.RenderTopPrompts(TopPromptsPanel, TopPromptsEmpty, period.Rows("topPrompts"));
-        ChartRenderer.RenderExpandableModelBreakdown(ModelBreakdownPanel, ModelBreakdownEmpty, period.Rows("byModel"), expandedModels, RenderOverviewAnalytics);
+        ChartRenderer.RenderExpandableModelBreakdown(ModelBreakdownPanel, ModelBreakdownEmpty, period.Rows("byModel"), expandedModels, RenderCostAnalytics);
         ChartRenderer.RenderHeavyChats(HeavyChatsPanel, HeavyChatsEmpty, period.Rows("topChats"));
 
         // Daily spend chart: show clean daily bars for 7d/30d; in 24h show 7d daily trend so it's always useful and never noisy
@@ -619,7 +617,7 @@ public partial class MainWindow : Window
         CostChartTitle.Text = trendPeriodKey == "30d" ? "Tendencia diaria de gasto (30 días)" : "Tendencia diaria de gasto (7 días)";
         CostChartSub.Text = $"Total: {Money(trendPeriod.Get("apiCost").Number("usd"))}";
 
-        if (OverviewPanel.Visibility == Visibility.Visible && trendPeriod.ValueKind == JsonValueKind.Object)
+        if (CostBarChart.IsVisible && trendPeriod.ValueKind == JsonValueKind.Object)
             ChartRenderer.DrawCostBarChart(CostBarChart, CostBarEmpty, trendPeriod);
     }
 
@@ -664,32 +662,27 @@ public partial class MainWindow : Window
         AvgCostTurnSub.Text = $"{Number(promptCount)} prompts · {avgSteps?.ToString("0.#", Locale) ?? "—"} pasos/prompt";
 
         var rows = period.Rows("byModelEffort").ToList();
-        AnalyticsCoverage.Text = $"{Number(chatCount)} chats · {Number(promptCount)} prompts · {rows.Count} combinaciones modelo × esfuerzo";
+        AnalyticsCoverage.Text = $"{Number(chatCount)} chats · {Number(promptCount)} prompts";
         ModelEffortGrid.ItemsSource = FormatComparisonRows(rows);
 
-        if (AnalyticsPanel.Visibility == Visibility.Visible)
-        {
+        if (ContextImpactChart.IsVisible)
             ChartRenderer.DrawContextImpactChart(ContextImpactChart, ContextImpactEmpty, ContextImpactInsight, period.Rows("contextBuckets"));
+        if (EffortImpactChart.IsVisible)
             ChartRenderer.DrawEffortComparisonChart(EffortImpactChart, EffortImpactEmpty, EffortImpactInsight, period.Rows("byEffort"));
+        if (ModelComparisonChart.IsVisible)
             ChartRenderer.DrawModelComparisonChart(ModelComparisonChart, ModelComparisonEmpty, rows, activeComparisonMetric);
-        }
     }
 
     private void RenderSessionComparison()
     {
-        var compRows = Current.CurrentInteractions.Rows("sessionModelComparison").ToList();
-        if (compRows.Count == 0)
-        {
-            SessionComparisonCard.Visibility = Visibility.Collapsed;
-            return;
-        }
-        SessionComparisonCard.Visibility = Visibility.Visible;
-        SessionComparisonExpander.Header = compRows.Count == 1
-            ? "Resumen de modelo y esfuerzo en este chat (1 combinación)"
-            : $"Comparativa en este chat: {compRows.Count} combinaciones modelo × esfuerzo";
-        SessionComparisonExpander.IsExpanded = compRows.Count > 1;
+        var hasChat = Current.PendingSession is null &&
+            SessionPicker.SelectedItem is SessionOption session && session.Reference == Current.CurrentInteractions.Text("selectedSession");
+        var compRows = hasChat ? Current.CurrentInteractions.Rows("sessionModelComparison").ToList() : [];
+        SessionComparisonCard.Visibility = compRows.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SessionComparisonEmpty.Visibility = hasChat && compRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        SessionCompChartPanel.Visibility = compRows.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
         SessionCompGrid.ItemsSource = FormatComparisonRows(compRows);
-        if (InteractionsPanel.Visibility == Visibility.Visible && SessionComparisonExpander.IsExpanded)
+        if (SessionCompChart.IsVisible)
             ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, compRows, "avgTurn");
     }
 
@@ -731,10 +724,10 @@ public partial class MainWindow : Window
             var fallback = session.Date("startedAt") is { } started ? $"Chat · {LocalTime(started)}" : "Chat local";
             var title = session.Text("title");
             var label = !string.IsNullOrEmpty(title) ? title : fallback;
-            return new SessionOption(session.Text("reference") ?? "", label, session.Date("updatedAt"),
+            return new SessionOption(session.Text("reference") ?? "", label, session.Date("updatedAt") ?? session.Date("startedAt"),
                 session.Get("partial").ValueKind == JsonValueKind.True,
                 session.Text("projectReference") ?? "", session.Text("projectSource"));
-        }).ToArray();
+        }).OrderByDescending(session => session.UpdatedAt).ThenBy(session => session.Label, TextOrder).ToArray();
 
         var preferredProject = state.SelectedProject;
         var projects = new List<ProjectOption> { new("*", $"Todos los proyectos ({state.AvailableSessions.Length})") };
@@ -755,13 +748,17 @@ public partial class MainWindow : Window
             if (previous is null || !previous.SequenceEqual(projects)) ProjectPicker.ItemsSource = projects.ToArray();
             var items = (ProjectOption[])ProjectPicker.ItemsSource;
             ProjectPicker.SelectedItem = items.FirstOrDefault(p => p.Reference == preferredProject) ?? items[0];
-            UpdateSessionPicker(state, actual, selectFirst: false);
+            UpdateSessionPicker(state, actual);
         }
         finally { updatingSessionPicker = false; }
-        RenderInteractions();
+        if (SessionPicker.SelectedItem is SessionOption session && session.Reference != actual &&
+            state.Recording && state.Active is not null && !state.Stopping && !closing)
+            _ = RequestSession(state, session);
+        else
+            RenderInteractions();
     }
 
-    private void UpdateSessionPicker(ProviderState state, string? actual, bool selectFirst)
+    private void UpdateSessionPicker(ProviderState state, string? actual)
     {
         var project = (ProjectPicker.SelectedItem as ProjectOption)?.Reference ?? "*";
         state.SelectedProject = project;
@@ -771,7 +768,7 @@ public partial class MainWindow : Window
         if (previous is null || !previous.SequenceEqual(options)) SessionPicker.ItemsSource = options;
         var visible = (SessionOption[])SessionPicker.ItemsSource;
         SessionPicker.SelectedItem = visible.FirstOrDefault(s => s.Reference == actual)
-            ?? (selectFirst ? visible.FirstOrDefault() : null);
+            ?? visible.FirstOrDefault();
     }
 
     private async void SelectProject(object sender, SelectionChangedEventArgs e)
@@ -779,7 +776,7 @@ public partial class MainWindow : Window
         if (updatingSessionPicker || SessionPicker is null) return;
         var state = Current;
         updatingSessionPicker = true;
-        try { UpdateSessionPicker(state, state.CurrentInteractions.Text("selectedSession"), selectFirst: true); }
+        try { UpdateSessionPicker(state, state.CurrentInteractions.Text("selectedSession")); }
         finally { updatingSessionPicker = false; }
 
         if (SessionPicker.SelectedItem is SessionOption session && NeedsSession(state, session))
@@ -806,8 +803,11 @@ public partial class MainWindow : Window
     {
         if (!state.Recording || state.Stopping || state.Active is not { } process) return;
         state.PendingSession = session.Reference;
-        InteractionCoverage.Text = "Cargando chat…";
+        SetChatStatus("Cargando chat…");
+        InteractionCoverage.Text = "";
         InteractionsGrid.ItemsSource = null;
+        SessionQuotaCard.Visibility = Visibility.Collapsed;
+        RenderSessionComparison();
         try
         {
             await process.StandardInput.WriteLineAsync("session " + session.Reference);
@@ -850,10 +850,16 @@ public partial class MainWindow : Window
         if (SessionPicker.SelectedItem is not SessionOption session || session.Reference != state.CurrentInteractions.Text("selectedSession"))
         {
             InteractionsGrid.ItemsSource = null;
-            InteractionCoverage.Text = state.CurrentInteractions.ValueKind == JsonValueKind.Undefined
-                ? "Buscando chats…" : "Seleccioná un chat.";
+            if (SessionQuotaCard is null || ChatState is null) return;
+            SessionQuotaCard.Visibility = Visibility.Collapsed;
+            InteractionCoverage.Text = "";
+            SetChatStatus(state.CurrentInteractions.ValueKind == JsonValueKind.Undefined
+                ? "Buscando chats…" : "Seleccioná un chat");
+            RenderSessionComparison();
             return;
         }
+        SetChatStatus(null);
+        RenderSessionQuota(state.CurrentInteractions.Get("sessionQuotaHistory"));
         var questions = InteractionFilter.SelectedIndex != 1;
         var (pool, minutes) = SelectedQuotaBucket();
         var query = SearchBox.Text?.Trim();
@@ -886,9 +892,92 @@ public partial class MainWindow : Window
         var count = rows.Count;
         var chatCost = rows.Where(r => r.CostUsd.HasValue).Sum(r => r.CostUsd!.Value);
         InteractionCoverage.Text = $"{Number(count)} {(questions ? count == 1 ? "prompt" : "prompts" : count == 1 ? "ejecución automática" : "ejecuciones automáticas")}"
-            + (chatCost > 0 ? $" · Total chat: {Money(chatCost)}" : "")
             + (session.Partial ? " · Parcial" : "");
+        InteractionCoverage.ToolTip = chatCost > 0 ? $"Costo API de las filas visibles · {Money(chatCost)}" : null;
         RenderSessionComparison();
+    }
+
+    private void SetChatStatus(string? message)
+    {
+        ChatState.Text = message ?? "";
+        ChatState.Visibility = message is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void SelectChatView(object sender, SelectionChangedEventArgs e)
+    {
+        if (IsLoaded && ReferenceEquals(e.OriginalSource, ChatViewTabs))
+            _ = Dispatcher.InvokeAsync(RedrawActiveCharts, DispatcherPriority.Loaded);
+    }
+
+    private void RenderSessionQuota(JsonElement summary)
+    {
+        var weeks = summary.Rows("weeks").Select(week => new
+        {
+            Range = SessionQuotaRange(week),
+            Pool = SessionQuotaPool(week),
+            Drop = SessionQuotaDrop(week),
+            Coverage = SessionQuotaCoverage(week),
+        }).ToArray();
+        var blocks = summary.Rows("blocks").Select(block =>
+        {
+            var weekly = block.Rows("weekly").ToArray();
+            var shortWindow = block.Get("short");
+            return new
+            {
+                Range = SessionQuotaRange(block),
+                Pool = SessionQuotaPool(block),
+                Drop = SessionQuotaDrop(shortWindow),
+                WeekDrop = weekly.Length == 0 ? "—" : string.Join(" / ", weekly.Select(SessionQuotaDrop)),
+                WeekHint = weekly.Length == 0 ? "Sin lecturas semanales para este bloque." :
+                    string.Join("\n", weekly.Select(part =>
+                        $"Semana que termina {LocalTime(part.Date("resetsAt")!.Value)} · {SessionQuotaCoverage(part)}")),
+                Coverage = SessionQuotaCoverage(shortWindow),
+            };
+        }).ToArray();
+        if (SessionQuotaWeeks.ItemsSource is not IEnumerable<object> previousWeeks || !previousWeeks.SequenceEqual(weeks))
+            SessionQuotaWeeks.ItemsSource = weeks;
+        if (SessionQuotaBlocks.ItemsSource is not IEnumerable<object> previousBlocks || !previousBlocks.SequenceEqual(blocks))
+            SessionQuotaBlocks.ItemsSource = blocks;
+
+        var poolVisibility = activeProvider == ProviderKind.Codex ? Visibility.Collapsed : Visibility.Visible;
+        SessionQuotaWeekPool.Visibility = SessionQuotaBlockPool.Visibility = poolVisibility;
+        SessionQuotaWeeks.Visibility = weeks.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SessionQuotaWeeksEmpty.Visibility = weeks.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        SessionQuotaBlocks.Visibility = blocks.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SessionQuotaBlocksEmpty.Visibility = blocks.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        SessionQuotaCard.Visibility = Visibility.Visible;
+    }
+
+    private static string SessionQuotaRange(JsonElement period)
+    {
+        if (period.Date("startsAt") is not { } start || period.Date("endsAt") is not { } end) return "—";
+        var endLabel = start.ToLocalTime().Date == end.ToLocalTime().Date
+            ? end.ToLocalTime().ToString("HH:mm", Locale) : LocalTime(end);
+        var status = period.Get("active").ValueKind == JsonValueKind.True ? " · En curso" : "";
+        return $"{LocalTime(start)} → {endLabel}{status}";
+    }
+
+    private static string SessionQuotaPool(JsonElement period) => period.Text("pool") switch
+    {
+        "gemini" => "Gemini",
+        "claude_gpt" => "Claude/GPT",
+        _ => "Codex",
+    };
+
+    private static string SessionQuotaDrop(JsonElement total) => total.Number("deltaPp") switch
+    {
+        null => "—",
+        0 => "0 %",
+        double delta => $"Bajó {Percent(delta)}",
+    };
+
+    private static string SessionQuotaCoverage(JsonElement total)
+    {
+        var activities = total.Count("activities") ?? 0;
+        if (activities == 0) return "Sin actividad";
+        var partial = total.Count("partial") ?? 0;
+        return $"{Number(total.Count("measured") ?? 0)} de {Number(activities)} medidas"
+            + (partial > 0 ? $" · {Number(partial)} {(partial == 1 ? "parcial" : "parciales")}" : "");
     }
 
     private static IEnumerable<InteractionRow> SessionRows(JsonElement turn, int minutes, string? pool, bool questions)
@@ -940,7 +1029,21 @@ public partial class MainWindow : Window
             var beforeConfirmed = impact.Get("hasStart").ValueKind == JsonValueKind.True;
             var beforeValue = !combined ? AvailableValue(before) : null;
             var afterValue = !combined ? AvailableValue(after) : null;
-            var dropValue = beforeValue.HasValue && afterValue.HasValue ? impact.Number("deltaPp") : null;
+            var dropValue = combined ? null : impact.Number("deltaPp");
+            var measurementHint = combined ? "Varios envíos comparten la misma respuesta. La baja conjunta está en el detalle."
+                : measurement switch
+                {
+                    "Compartida" => "Hubo otra actividad en el intervalo.",
+                    "Parcial" => (impact.Count("otherTurns") ?? 0) > 0
+                        ? "Lectura parcial con otra actividad en el intervalo."
+                        : "La baja corresponde al tramo con lecturas disponibles.",
+                    "Sin comparar" => "Las lecturas corresponden a ventanas distintas o incompatibles.",
+                    "Sin lectura" => "Faltan dos lecturas comparables para calcular la baja.",
+                    _ => null,
+                };
+            if (!combined && impact.Get("fluctuated").ValueKind == JsonValueKind.True)
+                measurementHint = (measurementHint is null ? "" : measurementHint + " ")
+                    + "La cuota fluctuó entre lecturas. Se muestra la baja neta.";
             yield return new InteractionRow(
                 $"{reference}:{index}", time, time is { } stamp ? LocalTime(stamp) : "—", label, model, effort, calls,
                 tokensShort, totalTokens,
@@ -950,7 +1053,7 @@ public partial class MainWindow : Window
                 combined ? "En conjunto" : measurement,
                 !combined ? SnapshotHint(before, beforeConfirmed ? "Antes de enviar el prompt" : "Durante la ejecución") : null,
                 !combined ? SnapshotHint(after, impact.Get("hasEnd").ValueKind == JsonValueKind.True ? "Al terminar la respuesta" : "Última lectura") : null,
-                combined ? "Varios envíos comparten la misma respuesta." : measurement == "Compartida" ? "Hubo otra actividad en el intervalo." : null,
+                measurementHint,
                 beforeValue, afterValue, dropValue, effortRank, turn);
         }
     }
@@ -980,7 +1083,6 @@ public partial class MainWindow : Window
 
     private void ShowInteractionSort()
     {
-        string label = "Fecha";
         foreach (var column in InteractionsGrid.Columns)
         {
             var selected = column.SortMemberPath == interactionSortColumn;
@@ -989,12 +1091,9 @@ public partial class MainWindow : Window
             var name = text.TrimEnd(' ', '↑', '↓');
             var header = selected ? $"{name} {(interactionSortDirection == ListSortDirection.Descending ? "↓" : "↑")}" : name;
             if (text != header) column.Header = header;
-            if (selected) label = name;
         }
         var direction = interactionSortDirection == ListSortDirection.Descending;
         var byDate = interactionSortColumn == nameof(InteractionRow.At);
-        InteractionSortLabel.Text = byDate ? (direction ? "Más recientes primero" : "Más antiguos primero")
-            : $"{label} {(direction ? "↓" : "↑")}";
         ResetInteractionSortButton.Visibility = byDate && direction ? Visibility.Collapsed : Visibility.Visible;
     }
 
@@ -1109,7 +1208,7 @@ public partial class MainWindow : Window
         SetImpact(Impact(turn, 10080, activePool), turn.Text("status") == "end-unobserved", WeekImpact, WeekReadings, WeekExplanation);
 
         var requests = turn.Rows("requests").ToList();
-        CallsExpander.Header = $"Ver {requests.Count} {(requests.Count == 1 ? "paso" : "pasos")} del modelo (contexto, tokens y costo)";
+        CallsExpander.Header = requests.Count == 1 ? "1 paso del modelo" : $"{Number(requests.Count)} pasos del modelo";
         RequestsGrid.ItemsSource = requests.Select(request =>
         {
             var usage = request.Get("usage");
@@ -1196,11 +1295,13 @@ public partial class MainWindow : Window
         {
             "discontinuity" => "Ventana reiniciada o incomparable.",
             "unavailable" or null => "Faltan lecturas antes y después del prompt.",
-            _ when delta == 0 => "Mismo porcentaje en ambas lecturas.",
             "shared" => $"Compartida con {others} {(others == 1 ? "otro prompt" : "otros prompts")}.",
             "partial" => endUnobserved ? "Prompt en curso o lectura parcial." : "Medición parcial del tramo.",
-            _ => "Atribución directa sin otra actividad local.",
+            _ when delta == 0 => "Mismo porcentaje en ambas lecturas.",
+            _ => "Cambio de cuota observado durante el prompt.",
         };
+        if (impact.Get("fluctuated").ValueKind == JsonValueKind.True)
+            explanation.Text += " La cuota fluctuó entre lecturas. Se muestra la baja neta.";
     }
 
     private static string? AvailableReading(JsonElement point) =>
@@ -1285,13 +1386,12 @@ public partial class MainWindow : Window
     private void SelectPage(string mode)
     {
         activePage = mode;
-        var providerName = activeProvider == ProviderKind.Codex ? "Codex" : "Antigravity";
         PageTitle.Text = mode switch
         {
-            "overview" => $"Resumen de {providerName}",
-            "analytics" => $"Análisis de {providerName}",
+            "overview" => "Resumen",
+            "analytics" => "Análisis",
             "history" => "Historial de cuota",
-            "sources" => "Fuentes y cobertura",
+            "sources" => "Fuentes",
             _ => "Prompts por chat",
         };
         OverviewPanel.Visibility = mode == "overview" ? Visibility.Visible : Visibility.Collapsed;
@@ -1307,8 +1407,11 @@ public partial class MainWindow : Window
             button.Foreground = selected ? Brushes.White : FrozenBrush("#9FB0CC");
         }
         MainScroll.ScrollToTop();
-        if (mode == "overview") RenderOverviewAnalytics();
-        if (mode == "analytics") RenderAnalyticsPage();
+        if (mode == "analytics")
+        {
+            RenderCostAnalytics();
+            RenderAnalyticsPage();
+        }
         if (mode == "interactions") RenderSessionComparison();
         if (mode == "history") RefreshHistoryIfVisible();
         DrawVisibleCharts();
@@ -1320,9 +1423,15 @@ public partial class MainWindow : Window
         resizeDebounce.Start();
     }
 
+    private void ExpandAnalyticsSection(object sender, RoutedEventArgs e)
+    {
+        if (ReferenceEquals(sender, e.OriginalSource))
+            _ = Dispatcher.InvokeAsync(RedrawActiveCharts, DispatcherPriority.Loaded);
+    }
+
     private void RedrawActiveCharts()
     {
-        if (OverviewPanel.Visibility == Visibility.Visible)
+        if (CostBarChart.IsVisible)
         {
             var trendKey = activePeriod == "24h" ? "7d" : activePeriod;
             var trendPeriod = Current.CurrentAnalytics.Get("periods").Get(trendKey);
@@ -1334,12 +1443,15 @@ public partial class MainWindow : Window
             var period = Current.CurrentAnalytics.Get("periods").Get(activePeriod);
             if (period.ValueKind == JsonValueKind.Object)
             {
-                ChartRenderer.DrawContextImpactChart(ContextImpactChart, ContextImpactEmpty, ContextImpactInsight, period.Rows("contextBuckets"));
-                ChartRenderer.DrawEffortComparisonChart(EffortImpactChart, EffortImpactEmpty, EffortImpactInsight, period.Rows("byEffort"));
-                ChartRenderer.DrawModelComparisonChart(ModelComparisonChart, ModelComparisonEmpty, period.Rows("byModelEffort"), activeComparisonMetric);
+                if (ContextImpactChart.IsVisible)
+                    ChartRenderer.DrawContextImpactChart(ContextImpactChart, ContextImpactEmpty, ContextImpactInsight, period.Rows("contextBuckets"));
+                if (EffortImpactChart.IsVisible)
+                    ChartRenderer.DrawEffortComparisonChart(EffortImpactChart, EffortImpactEmpty, EffortImpactInsight, period.Rows("byEffort"));
+                if (ModelComparisonChart.IsVisible)
+                    ChartRenderer.DrawModelComparisonChart(ModelComparisonChart, ModelComparisonEmpty, period.Rows("byModelEffort"), activeComparisonMetric);
             }
         }
-        if (InteractionsPanel.Visibility == Visibility.Visible && SessionComparisonExpander.IsExpanded)
+        if (SessionCompChart.IsVisible)
         {
             var comp = Current.CurrentInteractions.Rows("sessionModelComparison");
             ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, comp, "avgTurn");
