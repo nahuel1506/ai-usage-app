@@ -176,4 +176,14 @@ test('desglosa gasto por modelo×esfuerzo, promedios de cuota por turno/sesión 
   const inter = interactionSummary(history, t0, t0 + 90_000, live, true, { buckets });
   assert.equal(inter.sessionModelComparison.length, 2);
   assert.equal(inter.sessionModelComparison[0].effort, 'high');
+
+  // Verify new actionable metrics: topPrompts, contextBuckets, byEffort, topChats
+  assert.equal(p24.topPrompts.length, 2);
+  assert.equal(p24.topPrompts[0].effort, 'high');
+  assert.equal(p24.contextBuckets.length, 4);
+  assert.equal(p24.contextBuckets[1].prompts, 2); // 100k tokens -> 50k-150k bucket
+  assert.equal(p24.byEffort.length, 2);
+  assert.ok(p24.byEffort.find(e => e.effort === 'high').multiplier > 1);
+  assert.equal(p24.topChats.length, 1);
+  assert.equal(p24.topChats[0].prompts, 2);
 });

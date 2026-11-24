@@ -14,11 +14,12 @@ Aplicación de escritorio **local-first** para Windows que monitorea en vivo el 
   - Respeta la semántica exacta de tokens por proveedor (entrada inclusiva vs. exclusiva de caché, razonamiento incluido en salida) y aplica **tramos de contexto largo** (`> 272k` en OpenAI GPT-6.x / 5.4 y `> 200k` en Gemini Pro) llamada por llamada.
   - Calcula **ahorro real por prompt caching** y **cache hit rate (%)**.
   - **Sincronización automática cada 24 h** del catálogo público de precios en segundo plano, con tarifas oficiales fechadas como base prioritaria.
-- **Dashboard moderno y analítica profunda:**
-  - **Resumen:** cuotas en vivo con cuenta regresiva, selector `24 h / 7 días / 30 días`, gráfica de gasto por hora/día, donut de composición del costo (Entrada / Caché / Salida), ranking por proyecto, **gasto por modelo expandible por nivel de razonamiento**, y evolución de cuota con área degradada.
-  - **Preguntas:** filtros por proyecto, sesión, búsqueda en vivo, ventana de cuota y ordenamiento; **comparativa de modelos y niveles de razonamiento dentro de la misma sesión**; inspector con chips de metadatos, distribución de tokens y desglose por llamada.
-  - **Análisis:** promedios de consumo de cuota (`5 h` y `Semanal`) y costo API por sesión y por turno, más gráfica y tabla comparativa multimétrica (`Costo`, `$/turno`, `Tokens`, `% Razonam.`, `% Caché`, `Baja 5 h`).
-  - **Historial y Fuentes:** tabla con delta (`Δ 5 h`) entre muestras consecutivas, salud de fuentes y estado del catálogo de tarifas.
+- **Dashboard orientado a decisiones (sin métricas de relleno):**
+  - **Terminología unificada (`Chat → Prompt → Pasos del modelo`):** distingue claramente un chat, tus prompts (y ejecuciones automáticas) y cada paso del modelo (`1.º paso`, `Iteración`, `Subagente`), con glosario integrado.
+  - **Resumen:** cuotas en vivo con cuenta regresiva y **autonomía estimada** (*«~N prompts restantes al ritmo actual»*), selector `24 h / 7 días / 30 días`, **ROI de tu suscripción** (configurable por proveedor), ahorro por caché, **Top 5 prompts más costosos**, **gasto por modelo expandible por nivel de razonamiento**, **chats más pesados** (alerta en `>200k`), tendencia diaria (7 d / 30 d) y evolución de cuota.
+  - **Prompts:** filtros por proyecto, chat, búsqueda, ventana de cuota y origen (`Mis prompts` / `Automáticos`); **comparativa de modelos y esfuerzos dentro del mismo chat**; inspector con chips y tabla paso por paso.
+  - **Análisis:** promedios de cuota (`5 h` y `Semanal`) y costo por chat y por prompt, **impacto del tamaño de chat** (`<50k` a `>250k`, para saber cuándo abrir un chat nuevo), **comparativa directa de esfuerzo** (`Low` vs `Medium` vs `High` vs `XHigh`) y tabla comparativa `Modelo × Esfuerzo`.
+  - **Historial y Fuentes:** tabla con delta (`Δ 5 h`), salud de fuentes y estado del catálogo de tarifas.
   - **Tema claro y oscuro:** detecta automáticamente la preferencia de Windows y permite alternar con un clic.
 
 ## Requisitos

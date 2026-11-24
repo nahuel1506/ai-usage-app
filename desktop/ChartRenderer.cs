@@ -18,6 +18,8 @@ internal static class ChartRenderer
         Formatters.FrozenBrush("#3B82F6"),
     ];
 
+    private static readonly SolidColorBrush WarnBrush = Formatters.FrozenBrush("#F59E0B");
+    private static readonly SolidColorBrush DangerBrush = Formatters.FrozenBrush("#EF4444");
     private static readonly DoubleCollection DashedStroke = CreateDashed();
 
     private static DoubleCollection CreateDashed()
@@ -25,6 +27,144 @@ internal static class ChartRenderer
         var dash = new DoubleCollection { 3, 3 };
         dash.Freeze();
         return dash;
+    }
+
+    internal static void RenderTopPrompts(StackPanel container, TextBlock emptyLabel, IEnumerable<JsonElement> rows)
+    {
+        container.Children.Clear();
+        var list = rows.ToList();
+        emptyLabel.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (list.Count == 0) return;
+
+        var surfaceAlt = (Brush)Application.Current.Resources["BgSurfaceAlt"];
+        var borderSubtle = (Brush)Application.Current.Resources["BorderSubtle"];
+        var muted = (Brush)Application.Current.Resources["TextMuted"];
+        var accent = (Brush)Application.Current.Resources["AccentPrimary"];
+        var teal = (Brush)Application.Current.Resources["AccentSecondary"];
+
+        for (var i = 0; i < list.Count; i++)
+        {
+            var row = list[i];
+            var preview = row.Text("preview") ?? "Prompt sin vista previa";
+            var project = row.Text("project") ?? "Sin proyecto";
+            var model = row.Text("model") ?? "—";
+            var effRaw = row.Text("effort");
+            var eff = effRaw is null or "" or "unspecified" ? "" : $" ({Formatters.EffortLabel(effRaw)})";
+            var steps = row.Count("steps") ?? 0;
+            var maxCtx = row.Count("maxContextTokens") ?? 0;
+            var usd = row.Number("usd");
+            var drop5h = row.Number("drop5hPp");
+
+            var card = new Border
+            {
+                Background = surfaceAlt,
+                BorderBrush = borderSubtle,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(11, 8, 11, 8),
+                Margin = new Thickness(0, 0, 0, 7),
+                ToolTip = $"{preview}\nProyecto: {project} · Modelo: {model}{eff}\n{Formatters.Number(steps)} pasos del modelo · Contexto máx.: {Formatters.ShortNumber(maxCtx)}",
+            };
+
+            var stack = new StackPanel();
+            var top = new DockPanel();
+            var right = new TextBlock
+            {
+                Text = Formatters.Money(usd) + (drop5h is > 0 ? $"  ·  -{Formatters.Percent(drop5h)}" : ""),
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = i == 0 ? accent : teal,
+                Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            DockPanel.SetDock(right, Dock.Right);
+            top.Children.Add(right);
+
+            top.Children.Add(new TextBlock
+            {
+                Text = $"{i + 1}. {preview}",
+                FontSize = 12,
+                FontWeight = FontWeights.Medium,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            });
+            stack.Children.Add(top);
+
+            var meta = $"{model}{eff} · {project} · {Formatters.Number(steps)} {(steps == 1 ? "paso" : "pasos")}"
+                + (maxCtx > 0 ? $" · ctx {Formatters.ShortNumber(maxCtx)}" : "");
+            stack.Children.Add(new TextBlock
+            {
+                Text = meta,
+                FontSize = 11,
+                Foreground = muted,
+                Margin = new Thickness(0, 3, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            });
+
+            card.Child = stack;
+            container.Children.Add(card);
+        }
+    }
+
+    internal static void RenderHeavyChats(StackPanel container, TextBlock emptyLabel, IEnumerable<JsonElement> rows)
+    {
+        container.Children.Clear();
+        var list = rows.ToList();
+        emptyLabel.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (list.Count == 0) return;
+
+        var maxUsd = list.Max(r => r.Number("usd") ?? 0);
+        var trackBg = (Brush)Application.Current.Resources["TrackBg"];
+        var muted = (Brush)Application.Current.Resources["TextMuted"];
+
+        for (var i = 0; i < list.Count; i++)
+        {
+            var row = list[i];
+            var title = row.Text("title") ?? "Chat local";
+            var project = row.Text("project") ?? "Sin proyecto";
+            var prompts = row.Count("prompts") ?? 0;
+            var steps = row.Count("steps") ?? 0;
+            var maxCtx = row.Count("maxContextTokens") ?? 0;
+            var usd = row.Number("usd") ?? 0;
+            var drop5h = row.Number("drop5hPp");
+            var ratio = maxUsd > 0 ? Math.Clamp(usd / maxUsd, 0.04, 1.0) : 0.2;
+            var isInflated = maxCtx >= 200_000;
+            var color = isInflated ? WarnBrush : Palette[i % Palette.Length];
+
+            var item = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
+            var top = new DockPanel { Margin = new Thickness(0, 0, 0, 3) };
+            var right = new TextBlock
+            {
+                Text = Formatters.Money(usd) + (drop5h is > 0 ? $" · -{Formatters.Percent(drop5h)}" : ""),
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(8, 0, 0, 0),
+            };
+            DockPanel.SetDock(right, Dock.Right);
+            top.Children.Add(right);
+
+            top.Children.Add(new TextBlock
+            {
+                Text = title,
+                FontSize = 12,
+                FontWeight = FontWeights.Medium,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                ToolTip = $"{title}\nProyecto: {project} · {Formatters.Number(prompts)} prompts · {Formatters.Number(steps)} pasos · Pico ctx: {Formatters.ShortNumber(maxCtx)}",
+            });
+            item.Children.Add(top);
+
+            var sub = new TextBlock
+            {
+                Text = $"{project} · {Formatters.Number(prompts)} prompts · {Formatters.Number(steps)} pasos · pico {Formatters.ShortNumber(maxCtx)}"
+                    + (isInflated ? " (chat pesado)" : ""),
+                FontSize = 10.5,
+                Foreground = isInflated ? WarnBrush : muted,
+                Margin = new Thickness(0, 0, 0, 4),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+            item.Children.Add(sub);
+            item.Children.Add(MakeProgressStrip(ratio, color, trackBg, 5));
+            container.Children.Add(item);
+        }
     }
 
     internal static void RenderExpandableModelBreakdown(
@@ -51,19 +191,18 @@ internal static class ChartRenderer
             var row = list[i];
             var name = row.Text("model") ?? "—";
             var usd = row.Number("usd");
-            var reqs = row.Count("requests") ?? 0;
             var turns = row.Count("turns") ?? 0;
+            var avgSteps = row.Number("avgStepsPerTurn");
             var share = row.Number("sharePct");
             var efforts = row.Rows("efforts").ToList();
             var hasEfforts = efforts.Count > 0;
             var isExpanded = expandedModels.Contains(name);
             var ratio = maxUsd > 0 && usd.HasValue
                 ? Math.Clamp(usd.Value / maxUsd, 0.03, 1.0)
-                : Math.Clamp((double)reqs / Math.Max(1, maxReqs), 0.03, 1.0);
+                : Math.Clamp((double)(row.Count("requests") ?? 0) / Math.Max(1, maxReqs), 0.03, 1.0);
             var barColor = Palette[i % Palette.Length];
 
             var wrapper = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
-
             var headerBorder = new Border
             {
                 Background = Brushes.Transparent,
@@ -86,7 +225,7 @@ internal static class ChartRenderer
             var topRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
             var rightText = new TextBlock
             {
-                Text = usd.HasValue ? $"{Formatters.Money(usd)}  ({share?.ToString("0.#", Formatters.Locale) ?? "0"} %)" : $"{Formatters.Number(reqs)} reqs",
+                Text = usd.HasValue ? $"{Formatters.Money(usd)}  ({share?.ToString("0.#", Formatters.Locale) ?? "0"} %)" : $"{Formatters.Number(turns)} prompts",
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
             };
@@ -94,10 +233,10 @@ internal static class ChartRenderer
             topRow.Children.Add(rightText);
 
             var chevron = hasEfforts ? (isExpanded ? "▾ " : "▸ ") : "";
-            var subMeta = efforts.Count > 1 ? $" · {efforts.Count} niveles" : "";
+            var subMeta = avgSteps.HasValue ? $" · {avgSteps.Value.ToString("0.#", Formatters.Locale)} pasos/prompt" : "";
             topRow.Children.Add(new TextBlock
             {
-                Text = $"{chevron}{name}  ·  {Formatters.Number(reqs)} reqs{subMeta}",
+                Text = $"{chevron}{name}  ·  {Formatters.Number(turns)} prompts{subMeta}",
                 FontSize = 12,
                 FontWeight = FontWeights.Medium,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -120,28 +259,26 @@ internal static class ChartRenderer
                 };
                 var subStack = new StackPanel();
                 var maxSubUsd = efforts.Max(e => e.Number("usd") ?? 0);
-                var maxSubReqs = efforts.Max(e => e.Count("requests") ?? 1);
+                var maxSubTurns = efforts.Max(e => e.Count("turns") ?? 1);
 
                 foreach (var eff in efforts)
                 {
                     var effRaw = eff.Text("effort");
                     var effName = effRaw == "unspecified" ? "Sin especificar" : Formatters.EffortLabel(effRaw);
                     var eUsd = eff.Number("usd");
-                    var eReqs = eff.Count("requests") ?? 0;
                     var eTurns = eff.Count("turns") ?? 0;
-                    var eShare = eff.Number("sharePct");
-                    var eAvg = eff.Number("avgCostPerTurnUsd");
-                    var eReason = eff.Number("reasoningPct");
+                    var eAvgSteps = eff.Number("avgStepsPerTurn");
+                    var eAvgCost = eff.Number("avgCostPerTurnUsd");
                     var eRatio = maxSubUsd > 0 && eUsd.HasValue
                         ? Math.Clamp(eUsd.Value / maxSubUsd, 0.04, 1.0)
-                        : Math.Clamp((double)eReqs / Math.Max(1, maxSubReqs), 0.04, 1.0);
+                        : Math.Clamp((double)eTurns / Math.Max(1, maxSubTurns), 0.04, 1.0);
 
                     var effRow = new StackPanel { Margin = new Thickness(0, 0, 0, 7) };
                     var line = new DockPanel { Margin = new Thickness(0, 0, 0, 3) };
                     var eRight = new TextBlock
                     {
-                        Text = (eUsd.HasValue ? $"{Formatters.Money(eUsd)} ({eShare?.ToString("0.#", Formatters.Locale) ?? "0"} %)" : $"{Formatters.Number(eReqs)} reqs")
-                            + (eAvg.HasValue ? $" · {Formatters.Money(eAvg)}/turno" : ""),
+                        Text = (eUsd.HasValue ? Formatters.Money(eUsd) : "—")
+                            + (eAvgCost.HasValue ? $" · {Formatters.Money(eAvgCost)}/prompt" : ""),
                         FontSize = 11,
                         FontWeight = FontWeights.SemiBold,
                     };
@@ -150,8 +287,8 @@ internal static class ChartRenderer
 
                     line.Children.Add(new TextBlock
                     {
-                        Text = $"{effName}  ·  {Formatters.Number(eTurns)} turnos · {Formatters.Number(eReqs)} reqs"
-                            + (eReason.HasValue ? $" · {eReason.Value.ToString("0", Formatters.Locale)}% razonam." : ""),
+                        Text = $"{effName}  ·  {Formatters.Number(eTurns)} prompts"
+                            + (eAvgSteps.HasValue ? $" · {eAvgSteps.Value.ToString("0.#", Formatters.Locale)} pasos/prompt" : ""),
                         FontSize = 11,
                         Foreground = muted,
                         TextTrimming = TextTrimming.CharacterEllipsis,
@@ -169,18 +306,177 @@ internal static class ChartRenderer
         }
     }
 
-    private static Grid MakeProgressStrip(double ratio, Brush fillColor, Brush trackBg, double height)
+    internal static void DrawContextImpactChart(Canvas canvas, TextBlock emptyLabel, TextBlock insightLabel, IEnumerable<JsonElement> buckets)
     {
-        var host = new Grid { Height = height };
-        host.Children.Add(new Border { Background = trackBg, CornerRadius = new CornerRadius(height / 2) });
-        var fillGrid = new Grid();
-        fillGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratio, GridUnitType.Star) });
-        fillGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0, 1 - ratio), GridUnitType.Star) });
-        var fill = new Border { Background = fillColor, CornerRadius = new CornerRadius(height / 2) };
-        Grid.SetColumn(fill, 0);
-        fillGrid.Children.Add(fill);
-        host.Children.Add(fillGrid);
-        return host;
+        canvas.Children.Clear();
+        var list = buckets.ToArray();
+        var maxAvg = list.Length > 0 ? list.Max(b => b.Number("avgCostUsd") ?? 0) : 0;
+        emptyLabel.Visibility = maxAvg <= 0 ? Visibility.Visible : Visibility.Collapsed;
+        var width = canvas.ActualWidth;
+        var height = canvas.ActualHeight;
+
+        // Build actionable takeaway sentence
+        var heavy = list.LastOrDefault(b => (b.Count("prompts") ?? 0) > 0 && b.Number("multiplier") is > 1.2);
+        if (heavy.ValueKind == JsonValueKind.Object && heavy.Number("multiplier") is { } heavyMult)
+            insightLabel.Text = $"Prompts en chats {heavy.Text("label")} cuestan {heavyMult.ToString("0.#", Formatters.Locale)}× más por prompt. Considerá abrir un chat nuevo al pasar 150k–200k.";
+        else
+            insightLabel.Text = "Costo promedio por prompt según cuánto historial arrastra el chat.";
+
+        if (maxAvg <= 0 || width < 140 || height < 80) return;
+
+        var gridBrush = (Brush)Application.Current.Resources["GridLine"];
+        var muted = (Brush)Application.Current.Resources["TextMuted"];
+        var primary = (Brush)Application.Current.Resources["TextPrimary"];
+
+        const double left = 46, rightPad = 12, top = 22, bottom = 36;
+        var plotW = width - left - rightPad;
+        var plotH = height - top - bottom;
+
+        for (var step = 0; step <= 2; step++)
+        {
+            var val = maxAvg * step / 2.0;
+            var y = top + plotH * (1 - step / 2.0);
+            canvas.Children.Add(new Line
+            {
+                X1 = left, X2 = width - rightPad, Y1 = y, Y2 = y,
+                Stroke = gridBrush, StrokeThickness = 1, StrokeDashArray = step == 0 ? null : DashedStroke,
+            });
+            var yl = new TextBlock { Text = Formatters.Money(val), Foreground = muted, FontSize = 10 };
+            Canvas.SetLeft(yl, 0);
+            Canvas.SetTop(yl, y - 7);
+            canvas.Children.Add(yl);
+        }
+
+        var slotW = plotW / list.Length;
+        var barW = Math.Clamp(slotW * 0.52, 24, 62);
+        SolidColorBrush[] colors = [Palette[1], Palette[0], WarnBrush, DangerBrush];
+
+        for (var i = 0; i < list.Length; i++)
+        {
+            var b = list[i];
+            var avg = b.Number("avgCostUsd") ?? 0;
+            var prompts = b.Count("prompts") ?? 0;
+            var avgSteps = b.Number("avgSteps");
+            var mult = b.Number("multiplier");
+            var cx = left + slotW * i + slotW / 2;
+
+            if (avg > 0)
+            {
+                var bh = Math.Max(4, plotH * (avg / maxAvg));
+                var yBar = top + plotH - bh;
+                var rect = new Border
+                {
+                    Width = barW,
+                    Height = bh,
+                    Background = colors[i % colors.Length],
+                    CornerRadius = new CornerRadius(6, 6, 2, 2),
+                    ToolTip = $"{b.Text("label")} ({b.Text("subtitle")})\nPromedio: {Formatters.Money(avg)} / prompt\n{Formatters.Number(prompts)} prompts · {avgSteps?.ToString("0.#", Formatters.Locale) ?? "—"} pasos/prompt"
+                        + (mult.HasValue ? $"\n{mult.Value.ToString("0.#", Formatters.Locale)}× respecto a chats cortos" : ""),
+                };
+                Canvas.SetLeft(rect, cx - barW / 2);
+                Canvas.SetTop(rect, yBar);
+                canvas.Children.Add(rect);
+
+                var topLbl = new TextBlock
+                {
+                    Text = Formatters.Money(avg) + (mult is > 1.1 ? $" ({mult.Value.ToString("0.#", Formatters.Locale)}×)" : ""),
+                    FontSize = 10.5,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = primary,
+                    Width = slotW,
+                    TextAlignment = TextAlignment.Center,
+                };
+                Canvas.SetLeft(topLbl, cx - slotW / 2);
+                Canvas.SetTop(topLbl, yBar - 17);
+                canvas.Children.Add(topLbl);
+            }
+
+            var xLbl = new TextBlock
+            {
+                Text = $"{b.Text("label")}\n({prompts})",
+                FontSize = 10,
+                Foreground = muted,
+                Width = slotW,
+                TextAlignment = TextAlignment.Center,
+            };
+            Canvas.SetLeft(xLbl, cx - slotW / 2);
+            Canvas.SetTop(xLbl, top + plotH + 5);
+            canvas.Children.Add(xLbl);
+        }
+    }
+
+    internal static void DrawEffortComparisonChart(Canvas canvas, TextBlock emptyLabel, TextBlock insightLabel, IEnumerable<JsonElement> rows)
+    {
+        canvas.Children.Clear();
+        var list = rows.Where(r => (r.Number("avgCostPerPromptUsd") ?? 0) > 0).ToArray();
+        emptyLabel.Visibility = list.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        var highest = list.OrderByDescending(r => r.Number("avgCostPerPromptUsd") ?? 0).FirstOrDefault();
+        if (highest.ValueKind == JsonValueKind.Object && highest.Number("multiplier") is > 1.2)
+        {
+            var effName = Formatters.EffortLabel(highest.Text("effort"));
+            insightLabel.Text = $"Nivel «{effName}» cuesta {highest.Number("multiplier")!.Value.ToString("0.#", Formatters.Locale)}× más por prompt ({Formatters.Money(highest.Number("avgCostPerPromptUsd"))}) que el nivel base.";
+        }
+        else
+        {
+            insightLabel.Text = "Comparativa de costo, pasos del modelo y cuota 5 h promedio por prompt según nivel.";
+        }
+
+        var width = canvas.ActualWidth;
+        var height = canvas.ActualHeight;
+        if (list.Length == 0 || width < 140 || height < 60) return;
+
+        var maxVal = list.Max(r => r.Number("avgCostPerPromptUsd") ?? 0);
+        var muted = (Brush)Application.Current.Resources["TextMuted"];
+        var primary = (Brush)Application.Current.Resources["TextPrimary"];
+        var trackBg = (Brush)Application.Current.Resources["TrackBg"];
+
+        const double labelW = 105, valueW = 145, topPad = 8, bottomPad = 8;
+        var barAreaW = Math.Max(60, width - labelW - valueW - 12);
+        var rowH = Math.Min(36, (height - topPad - bottomPad) / list.Length);
+        var barH = Math.Clamp(rowH * 0.52, 10, 18);
+
+        for (var i = 0; i < list.Length; i++)
+        {
+            var r = list[i];
+            var effRaw = r.Text("effort");
+            var label = effRaw == "unspecified" ? "Sin esp." : Formatters.EffortLabel(effRaw);
+            var avg = r.Number("avgCostPerPromptUsd") ?? 0;
+            var steps = r.Number("avgStepsPerPrompt");
+            var mult = r.Number("multiplier");
+            var drop5h = r.Number("avg5hDropPp");
+            var ratio = Math.Clamp(avg / Math.Max(0.0001, maxVal), 0.04, 1.0);
+            var y = topPad + i * rowH;
+            var color = Palette[i % Palette.Length];
+
+            var tip = $"Esfuerzo: {label}\nCosto prom.: {Formatters.Money(avg)} / prompt"
+                + (mult.HasValue ? $" ({mult.Value.ToString("0.#", Formatters.Locale)}×)" : "")
+                + $"\nPrompts: {Formatters.Number(r.Count("prompts"))} · Pasos prom.: {steps?.ToString("0.#", Formatters.Locale) ?? "—"}/prompt"
+                + (drop5h.HasValue ? $"\nCuota 5 h prom.: -{Formatters.Percent(drop5h)}/prompt" : "");
+
+            var lbl = new TextBlock { Text = label, Width = labelW - 6, FontSize = 12, FontWeight = FontWeights.Medium, Foreground = primary, ToolTip = tip };
+            Canvas.SetLeft(lbl, 0);
+            Canvas.SetTop(lbl, y + (rowH - 16) / 2);
+            canvas.Children.Add(lbl);
+
+            var track = new Border { Width = barAreaW, Height = barH, Background = trackBg, CornerRadius = new CornerRadius(4), ToolTip = tip };
+            Canvas.SetLeft(track, labelW);
+            Canvas.SetTop(track, y + (rowH - barH) / 2);
+            canvas.Children.Add(track);
+
+            var bar = new Border { Width = Math.Max(4, barAreaW * ratio), Height = barH, Background = color, CornerRadius = new CornerRadius(4), ToolTip = tip };
+            Canvas.SetLeft(bar, labelW);
+            Canvas.SetTop(bar, y + (rowH - barH) / 2);
+            canvas.Children.Add(bar);
+
+            var valText = $"{Formatters.Money(avg)}/prompt"
+                + (mult is > 1.1 ? $" ({mult.Value.ToString("0.#", Formatters.Locale)}×)" : "")
+                + (steps.HasValue ? $" · {steps.Value.ToString("0.#", Formatters.Locale)} p." : "");
+            var valLbl = new TextBlock { Text = valText, Width = valueW, FontSize = 11, FontWeight = FontWeights.SemiBold, Foreground = muted, TextAlignment = TextAlignment.Right };
+            Canvas.SetLeft(valLbl, labelW + barAreaW + 8);
+            Canvas.SetTop(valLbl, y + (rowH - 16) / 2);
+            canvas.Children.Add(valLbl);
+        }
     }
 
     internal static void DrawModelComparisonChart(Canvas canvas, TextBlock emptyLabel, IEnumerable<JsonElement> rows, string metric)
@@ -192,19 +488,14 @@ internal static class ChartRenderer
         double? MetricValue(JsonElement r) => metric switch
         {
             "avgTurn" => r.Number("avgCostPerTurnUsd"),
-            "tokens" => r.Count("tokens") is { } t ? (double?)t : null,
-            "reasoning" => r.Number("reasoningPct"),
-            "cache" => r.Number("cacheHitRatePct"),
             "drop5h" => r.Number("avg5hDropPp"),
             _ => r.Number("usd"),
         };
 
         string FormatMetric(double v) => metric switch
         {
-            "avgTurn" => Formatters.Money(v) + "/turno",
-            "tokens" => Formatters.ShortNumber((long)v),
-            "reasoning" or "cache" => v.ToString("0.#", Formatters.Locale) + " %",
-            "drop5h" => "-" + v.ToString("0.##", Formatters.Locale) + " %/turno",
+            "avgTurn" => Formatters.Money(v) + "/prompt",
+            "drop5h" => "-" + v.ToString("0.##", Formatters.Locale) + " %/prompt",
             _ => Formatters.Money(v),
         };
 
@@ -218,12 +509,12 @@ internal static class ChartRenderer
         emptyLabel.Visibility = items.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         if (items.Length == 0 || width < 140 || height < 60) return;
 
-        var maxVal = metric is "reasoning" or "cache" ? 100.0 : items.Max(x => x.Val!.Value);
+        var maxVal = items.Max(x => x.Val!.Value);
         var muted = (Brush)Application.Current.Resources["TextMuted"];
         var primaryText = (Brush)Application.Current.Resources["TextPrimary"];
         var trackBg = (Brush)Application.Current.Resources["TrackBg"];
 
-        const double labelW = 190, valueW = 92, topPad = 6, bottomPad = 6;
+        const double labelW = 195, valueW = 104, topPad = 6, bottomPad = 6;
         var barAreaW = Math.Max(60, width - labelW - valueW - 14);
         var rowH = Math.Min(30, (height - topPad - bottomPad) / items.Length);
         var barH = Math.Clamp(rowH * 0.56, 10, 18);
@@ -239,118 +530,30 @@ internal static class ChartRenderer
             var ratio = Math.Clamp(val!.Value / Math.Max(0.0001, maxVal), 0.02, 1.0);
             var color = Palette[i % Palette.Length];
 
-            var tooltip = $"{fullLabel}\nCosto API: {Formatters.Money(row.Number("usd"))} · {Formatters.Money(row.Number("avgCostPerTurnUsd"))}/turno\n"
-                + $"Turnos: {Formatters.Number(row.Count("turns"))} · Llamadas: {Formatters.Number(row.Count("requests"))} · Tokens: {Formatters.ShortNumber(row.Count("tokens"))}\n"
-                + $"Caché: {Formatters.Percent(row.Number("cacheHitRatePct"))} · Razonam.: {Formatters.Percent(row.Number("reasoningPct"))}"
-                + (row.Number("avg5hDropPp") is { } d5 ? $"\nBaja prom. 5 h: {Formatters.Percent(d5)}/turno ({row.Count("measured5hTurns")} medidos)" : "");
+            var tooltip = $"{fullLabel}\nCosto API: {Formatters.Money(row.Number("usd"))} · {Formatters.Money(row.Number("avgCostPerTurnUsd"))}/prompt\n"
+                + $"Prompts: {Formatters.Number(row.Count("turns"))} · Pasos prom.: {row.Number("avgStepsPerTurn")?.ToString("0.#", Formatters.Locale) ?? "—"}/prompt\n"
+                + $"Caché: {Formatters.Percent(row.Number("cacheHitRatePct"))}"
+                + (row.Number("avg5hDropPp") is { } d5 ? $"\nCuota 5 h prom.: -{Formatters.Percent(d5)}/prompt ({row.Count("measured5hTurns")} medidos)" : "");
 
-            var lbl = new TextBlock
-            {
-                Text = fullLabel,
-                Width = labelW - 10,
-                FontSize = 11.5,
-                Foreground = primaryText,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                ToolTip = tooltip,
-            };
+            var lbl = new TextBlock { Text = fullLabel, Width = labelW - 10, FontSize = 11.5, Foreground = primaryText, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = tooltip };
             Canvas.SetLeft(lbl, 0);
             Canvas.SetTop(lbl, y + (rowH - 16) / 2);
             canvas.Children.Add(lbl);
 
-            var track = new Border
-            {
-                Width = barAreaW,
-                Height = barH,
-                Background = trackBg,
-                CornerRadius = new CornerRadius(4),
-                ToolTip = tooltip,
-            };
+            var track = new Border { Width = barAreaW, Height = barH, Background = trackBg, CornerRadius = new CornerRadius(4), ToolTip = tooltip };
             Canvas.SetLeft(track, labelW);
             Canvas.SetTop(track, y + (rowH - barH) / 2);
             canvas.Children.Add(track);
 
-            var bar = new Border
-            {
-                Width = Math.Max(4, barAreaW * ratio),
-                Height = barH,
-                Background = color,
-                CornerRadius = new CornerRadius(4),
-                ToolTip = tooltip,
-            };
+            var bar = new Border { Width = Math.Max(4, barAreaW * ratio), Height = barH, Background = color, CornerRadius = new CornerRadius(4), ToolTip = tooltip };
             Canvas.SetLeft(bar, labelW);
             Canvas.SetTop(bar, y + (rowH - barH) / 2);
             canvas.Children.Add(bar);
 
-            var valLbl = new TextBlock
-            {
-                Text = FormatMetric(val.Value),
-                Width = valueW,
-                FontSize = 11.5,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = muted,
-                TextAlignment = TextAlignment.Right,
-            };
+            var valLbl = new TextBlock { Text = FormatMetric(val.Value), Width = valueW, FontSize = 11.5, FontWeight = FontWeights.SemiBold, Foreground = muted, TextAlignment = TextAlignment.Right };
             Canvas.SetLeft(valLbl, labelW + barAreaW + 8);
             Canvas.SetTop(valLbl, y + (rowH - 16) / 2);
             canvas.Children.Add(valLbl);
-        }
-    }
-
-    internal static void RenderBreakdownBars(StackPanel container, TextBlock emptyLabel, IEnumerable<JsonElement> rows, string nameField)
-    {
-        container.Children.Clear();
-        var list = rows.ToList();
-        emptyLabel.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (list.Count == 0) return;
-
-        var maxUsd = list.Max(r => r.Number("usd") ?? 0);
-        var maxReqs = list.Max(r => r.Count("requests") ?? 1);
-        var trackBg = (Brush)Application.Current.Resources["TrackBg"];
-
-        for (var i = 0; i < list.Count; i++)
-        {
-            var row = list[i];
-            var name = row.Text(nameField) ?? "—";
-            var usd = row.Number("usd");
-            var reqs = row.Count("requests") ?? 0;
-            var share = row.Number("sharePct");
-            var ratio = maxUsd > 0 && usd.HasValue
-                ? Math.Clamp(usd.Value / maxUsd, 0.03, 1.0)
-                : Math.Clamp((double)reqs / Math.Max(1, maxReqs), 0.03, 1.0);
-            var barColor = Palette[i % Palette.Length];
-
-            var item = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
-            var topRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
-            var rightText = new TextBlock
-            {
-                Text = usd.HasValue ? $"{Formatters.Money(usd)}  ({share?.ToString("0.#", Formatters.Locale) ?? "0"} %)" : $"{Formatters.Number(reqs)} reqs",
-                FontSize = 12,
-                FontWeight = FontWeights.SemiBold,
-            };
-            DockPanel.SetDock(rightText, Dock.Right);
-            topRow.Children.Add(rightText);
-
-            topRow.Children.Add(new TextBlock
-            {
-                Text = $"{name}  ·  {Formatters.Number(reqs)} reqs",
-                FontSize = 12,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                ToolTip = $"{name} · {Formatters.Number(reqs)} llamadas · {Formatters.ShortNumber(row.Count("tokens"))} tokens",
-            });
-            item.Children.Add(topRow);
-
-            var barHost = new Grid { Height = 6 };
-            barHost.Children.Add(new Border { Background = trackBg, CornerRadius = new CornerRadius(3) });
-            var fillGrid = new Grid();
-            fillGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratio, GridUnitType.Star) });
-            fillGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1 - ratio, GridUnitType.Star) });
-            var fill = new Border { Background = barColor, CornerRadius = new CornerRadius(3) };
-            Grid.SetColumn(fill, 0);
-            fillGrid.Children.Add(fill);
-            barHost.Children.Add(fillGrid);
-            item.Children.Add(barHost);
-
-            container.Children.Add(item);
         }
     }
 
@@ -379,8 +582,7 @@ internal static class ChartRenderer
             canvas.Children.Add(new Line
             {
                 X1 = left, X2 = width - rightPad, Y1 = y, Y2 = y,
-                Stroke = gridBrush, StrokeThickness = 1,
-                StrokeDashArray = step == 0 ? null : DashedStroke,
+                Stroke = gridBrush, StrokeThickness = 1, StrokeDashArray = step == 0 ? null : DashedStroke,
             });
             var lbl = new TextBlock { Text = Formatters.Money(val), Foreground = mutedBrush, FontSize = 10 };
             Canvas.SetLeft(lbl, 0);
@@ -397,7 +599,6 @@ internal static class ChartRenderer
             var b = buckets[i];
             var usd = b.Number("usd") ?? 0;
             var reqs = b.Count("requests") ?? 0;
-            var toks = b.Count("tokens") ?? 0;
             var label = b.Text("label") ?? "";
             var cx = left + slotW * i + slotW / 2;
 
@@ -410,7 +611,7 @@ internal static class ChartRenderer
                     Height = bh,
                     Background = barBrush,
                     CornerRadius = new CornerRadius(4, 4, 1, 1),
-                    ToolTip = $"{label} · {Formatters.Money(usd)}\n{Formatters.Number(reqs)} llamadas · {Formatters.ShortNumber(toks)} tokens",
+                    ToolTip = $"{label} · {Formatters.Money(usd)}\n{Formatters.Number(reqs)} pasos del modelo",
                 };
                 Canvas.SetLeft(rect, cx - barW / 2);
                 Canvas.SetTop(rect, top + plotH - bh);
@@ -424,84 +625,6 @@ internal static class ChartRenderer
                 Canvas.SetTop(xl, height - 16);
                 canvas.Children.Add(xl);
             }
-        }
-    }
-
-    internal static void DrawCostDonutChart(Canvas canvas, TextBlock totalText, StackPanel legendPanel, TextBlock emptyLabel, JsonElement apiCost)
-    {
-        canvas.Children.Clear();
-        legendPanel.Children.Clear();
-        var total = apiCost.Number("usd") ?? 0;
-        totalText.Text = total > 0 ? Formatters.Money(total) : "—";
-        emptyLabel.Visibility = total <= 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (total <= 0) return;
-
-        var bd = apiCost.Get("breakdown");
-        var segments = new (string Name, double Value, SolidColorBrush Color)[]
-        {
-            ("Entrada fresca", bd.Number("inputUsd") ?? 0, Palette[0]),
-            ("Lectura de caché", bd.Number("cacheReadUsd") ?? 0, Palette[1]),
-            ("Salida y razonam.", bd.Number("outputUsd") ?? 0, Palette[2]),
-            ("Escritura caché", bd.Number("cacheWriteUsd") ?? 0, Palette[4]),
-        }.Where(s => s.Value > 0).ToArray();
-
-        const double cx = 68, cy = 68, radius = 52, strokeW = 16;
-        double startAngle = -90;
-        var muted = (Brush)Application.Current.Resources["TextMuted"];
-
-        foreach (var (name, value, color) in segments)
-        {
-            var pct = value / total;
-            var sweep = Math.Min(359.5, pct * 360.0);
-            var endAngle = startAngle + sweep;
-            var p1 = Polar(cx, cy, radius, startAngle);
-            var p2 = Polar(cx, cy, radius, endAngle);
-
-            var fig = new PathFigure { StartPoint = p1, IsClosed = false };
-            fig.Segments.Add(new ArcSegment
-            {
-                Point = p2,
-                Size = new Size(radius, radius),
-                IsLargeArc = sweep > 180,
-                SweepDirection = SweepDirection.Clockwise,
-            });
-            var geo = new PathGeometry();
-            geo.Figures.Add(fig);
-            geo.Freeze();
-
-            canvas.Children.Add(new Path
-            {
-                Data = geo,
-                Stroke = color,
-                StrokeThickness = strokeW,
-                ToolTip = $"{name}: {Formatters.Money(value)} ({(pct * 100).ToString("0.#", Formatters.Locale)} %)",
-            });
-            startAngle = endAngle;
-
-            var row = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
-            var dot = new Ellipse { Width = 8, Height = 8, Fill = color, Margin = new Thickness(0, 0, 7, 0), VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(dot, Dock.Left);
-            row.Children.Add(dot);
-
-            var valTxt = new TextBlock
-            {
-                Text = $"{Formatters.Money(value)} ({(pct * 100).ToString("0", Formatters.Locale)}%)",
-                FontSize = 11,
-                FontWeight = FontWeights.SemiBold,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            DockPanel.SetDock(valTxt, Dock.Right);
-            row.Children.Add(valTxt);
-
-            row.Children.Add(new TextBlock
-            {
-                Text = name,
-                FontSize = 11,
-                Foreground = muted,
-                VerticalAlignment = VerticalAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-            });
-            legendPanel.Children.Add(row);
         }
     }
 
@@ -596,10 +719,18 @@ internal static class ChartRenderer
         }
     }
 
-    private static Point Polar(double cx, double cy, double r, double angleDeg)
+    private static Grid MakeProgressStrip(double ratio, Brush fillColor, Brush trackBg, double height)
     {
-        var rad = angleDeg * Math.PI / 180.0;
-        return new Point(cx + r * Math.Cos(rad), cy + r * Math.Sin(rad));
+        var host = new Grid { Height = height };
+        host.Children.Add(new Border { Background = trackBg, CornerRadius = new CornerRadius(height / 2) });
+        var fillGrid = new Grid();
+        fillGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratio, GridUnitType.Star) });
+        fillGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0, 1 - ratio), GridUnitType.Star) });
+        var fill = new Border { Background = fillColor, CornerRadius = new CornerRadius(height / 2) };
+        Grid.SetColumn(fill, 0);
+        fillGrid.Children.Add(fill);
+        host.Children.Add(fillGrid);
+        return host;
     }
 
     private static LinearGradientBrush MakeAreaGradient(Color baseColor)

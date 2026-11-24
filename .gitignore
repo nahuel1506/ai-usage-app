@@ -21,6 +21,7 @@ obj/
 *.pem
 pricing-cache.json
 project-folders.json
+settings.json
 .env
 .env.*
 local-data/

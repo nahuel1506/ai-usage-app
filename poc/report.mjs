@@ -230,6 +230,7 @@ function buildModelEffortComparison(requests, history, provider, turnQuotaMap) {
       ...(item.effort !== undefined ? { effort: item.effort } : {}),
       requests: item.requests,
       turns: turnCount,
+      avgStepsPerTurn: turnCount > 0 ? Number((item.requests / turnCount).toFixed(1)) : null,
       tokens: item.tokens,
       usd: usdVal,
       cacheSavingsUsd: item.pricedRequests > 0 ? Number(item.saved.toFixed(4)) : null,
@@ -263,7 +264,23 @@ function buildModelEffortComparison(requests, history, provider, turnQuotaMap) {
   return { models, byModelEffort };
 }
 
-function buildPeriodAnalytics(sameRequests, history, since, until, provider, bucketMode, projectNames, sessionProjects, turnQuotaMap) {
+function contextBucketIndex(maxCtx) {
+  if (maxCtx < 50_000) return 0;
+  if (maxCtx < 150_000) return 1;
+  if (maxCtx < 250_000) return 2;
+  return 3;
+}
+
+const CONTEXT_BUCKET_DEFS = [
+  { key: 'lt50k', label: '< 50 k', subtitle: 'Chat nuevo' },
+  { key: '50k_150k', label: '50k – 150k', subtitle: 'Chat medio' },
+  { key: '150k_250k', label: '150k – 250k', subtitle: 'Chat largo' },
+  { key: 'gt250k', label: '> 250 k', subtitle: 'Muy largo' },
+];
+
+const EFFORT_SORT_ORDER = { none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6, ultra: 7, unspecified: 99 };
+
+function buildPeriodAnalytics(sameRequests, history, since, until, provider, bucketMode, projectNames, sessionProjects, sessionTitles, turnQuotaMap) {
   const filtered = sameRequests.filter(req => req.time > since && req.time <= until);
   const turnIds = new Set();
   const sessionIds = new Set();
@@ -274,8 +291,10 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
   const sessionDropsWeek = new Map();
   const turnDrops5h = new Map();
   const turnDropsWeek = new Map();
+  const turnAggs = new Map();
+  const chatAggs = new Map();
 
-  // Pre-seed timeline buckets so the bar chart has zero-filled contiguous slots
+  // Pre-seed timeline buckets so daily charts have contiguous slots
   if (bucketMode === 'hour') {
     const endHour = Math.floor(until / 3_600_000) * 3_600_000;
     for (let i = 23; i >= 0; i--) {
@@ -300,13 +319,70 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     const sessionRef = turn?.session || null;
     if (sessionRef) sessionIds.add(sessionRef);
     const model = resolveReqModel(req, turn);
+    const effort = resolveReqEffort(req, turn);
     const priced = priceRequest(req.usage, model === 'Sin identificar' ? null : model, { provider, at: req.time });
     pricedList.push(priced);
 
     const usd = priced.available ? priced.usd : 0;
+    const ctxTokens = priced.available
+      ? priced.contextTokens
+      : (req.usage.input_tokens ?? 0) + (provider === 'antigravity' ? (req.usage.cached_input_tokens ?? 0) : 0);
     const totalTok = (req.usage.input_tokens ?? 0)
       + (provider === 'antigravity' ? (req.usage.cached_input_tokens ?? 0) : 0)
       + (req.usage.output_tokens ?? 0);
+
+    const projRef = sessionRef ? sessionProjects.get(sessionRef) : null;
+    const projName = (projRef && projectNames.get(projRef)) || 'Sin proyecto';
+
+    // Per-turn aggregation (for Top Prompts, Context Buckets, Effort Comparison)
+    let tAgg = turnAggs.get(req.turn);
+    if (!tAgg) {
+      const firstMsg = [...(turn?.messages?.values() ?? [])].sort((a, b) => a.time - b.time)[0];
+      tAgg = {
+        reference: req.turn,
+        session: sessionRef,
+        time: firstMsg?.time ?? turn?.started ?? req.time,
+        preview: firstMsg?.preview || null,
+        project: projName,
+        model,
+        effort,
+        steps: 0,
+        usd: 0,
+        pricedSteps: 0,
+        maxContextTokens: 0,
+        drop5hPp: null,
+        dropWeekPp: null,
+      };
+      turnAggs.set(req.turn, tAgg);
+    }
+    tAgg.steps++;
+    if (priced.available) {
+      tAgg.usd += usd;
+      tAgg.pricedSteps++;
+    }
+    if (ctxTokens > tAgg.maxContextTokens) tAgg.maxContextTokens = ctxTokens;
+
+    // Per-chat aggregation (for Heavy Chats)
+    if (sessionRef) {
+      let cAgg = chatAggs.get(sessionRef);
+      if (!cAgg) {
+        cAgg = {
+          reference: sessionRef,
+          title: sessionTitles.get(sessionRef) || 'Chat local',
+          project: projName,
+          turns: new Set(),
+          steps: 0,
+          usd: 0,
+          maxContextTokens: 0,
+          drop5hSum: 0,
+        };
+        chatAggs.set(sessionRef, cAgg);
+      }
+      cAgg.turns.add(req.turn);
+      cAgg.steps++;
+      cAgg.usd += usd;
+      if (ctxTokens > cAgg.maxContextTokens) cAgg.maxContextTokens = ctxTokens;
+    }
 
     // Track observed quota drops per turn & per session
     const q = turnQuotaMap?.get(req.turn);
@@ -315,21 +391,24 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
         const d5 = pickQuotaDelta(q, 300, provider, model);
         if (d5 !== null) {
           turnDrops5h.set(req.turn, d5);
-          if (sessionRef) sessionDrops5h.set(sessionRef, (sessionDrops5h.get(sessionRef) ?? 0) + d5);
+          tAgg.drop5hPp = d5;
+          if (sessionRef) {
+            sessionDrops5h.set(sessionRef, (sessionDrops5h.get(sessionRef) ?? 0) + d5);
+            if (chatAggs.has(sessionRef)) chatAggs.get(sessionRef).drop5hSum += d5;
+          }
         }
       }
       if (!turnDropsWeek.has(req.turn)) {
         const dw = pickQuotaDelta(q, 10080, provider, model);
         if (dw !== null) {
           turnDropsWeek.set(req.turn, dw);
+          tAgg.dropWeekPp = dw;
           if (sessionRef) sessionDropsWeek.set(sessionRef, (sessionDropsWeek.get(sessionRef) ?? 0) + dw);
         }
       }
     }
 
     // Project breakdown
-    const projRef = sessionRef ? sessionProjects.get(sessionRef) : null;
-    const projName = (projRef && projectNames.get(projRef)) || 'Sin proyecto';
     const pRow = byProject.get(projName) ?? { project: projName, requests: 0, tokens: 0, usd: 0 };
     pRow.requests++;
     pRow.tokens += totalTok;
@@ -359,6 +438,109 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
 
   const { models, byModelEffort } = buildModelEffortComparison(filtered, history, provider, turnQuotaMap);
 
+  // 1. Top 5 costliest prompts in this period
+  const topPrompts = [...turnAggs.values()]
+    .sort((a, b) => b.usd - a.usd || b.steps - a.steps)
+    .slice(0, 5)
+    .map(t => ({
+      reference: t.reference,
+      session: t.session,
+      at: new Date(t.time).toISOString(),
+      preview: t.preview || 'Prompt sin vista previa',
+      project: t.project,
+      model: t.model,
+      effort: t.effort,
+      steps: t.steps,
+      maxContextTokens: t.maxContextTokens,
+      usd: t.pricedSteps > 0 ? Number(t.usd.toFixed(4)) : null,
+      drop5hPp: t.drop5hPp,
+      dropWeekPp: t.dropWeekPp,
+    }));
+
+  // 2. Context-size impact buckets (<50k, 50-150k, 150-250k, >250k)
+  const rawBuckets = CONTEXT_BUCKET_DEFS.map(def => ({
+    ...def, prompts: 0, pricedPrompts: 0, usdSum: 0, stepsSum: 0, drop5hSum: 0, measured5h: 0,
+  }));
+  for (const t of turnAggs.values()) {
+    const b = rawBuckets[contextBucketIndex(t.maxContextTokens)];
+    b.prompts++;
+    b.stepsSum += t.steps;
+    if (t.pricedSteps > 0) {
+      b.pricedPrompts++;
+      b.usdSum += t.usd;
+    }
+    if (t.drop5hPp !== null) {
+      b.measured5h++;
+      b.drop5hSum += t.drop5hPp;
+    }
+  }
+  const baseBucket = rawBuckets.find(b => b.pricedPrompts > 0 && b.usdSum > 0);
+  const baseAvgUsd = baseBucket ? baseBucket.usdSum / baseBucket.pricedPrompts : null;
+  const contextBuckets = rawBuckets.map(b => {
+    const avgUsd = b.pricedPrompts > 0 ? b.usdSum / b.pricedPrompts : null;
+    return {
+      key: b.key,
+      label: b.label,
+      subtitle: b.subtitle,
+      prompts: b.prompts,
+      avgCostUsd: avgUsd !== null ? Number(avgUsd.toFixed(4)) : null,
+      avgSteps: b.prompts > 0 ? Number((b.stepsSum / b.prompts).toFixed(1)) : null,
+      avg5hDropPp: b.measured5h > 0 ? Number((b.drop5hSum / b.measured5h).toFixed(3)) : null,
+      measured5h: b.measured5h,
+      multiplier: avgUsd !== null && baseAvgUsd && baseAvgUsd > 0 ? Number((avgUsd / baseAvgUsd).toFixed(1)) : null,
+    };
+  });
+
+  // 3. Direct Effort Comparison (Low vs Medium vs High vs XHigh)
+  const effortMap = new Map();
+  for (const t of turnAggs.values()) {
+    const e = t.effort || 'unspecified';
+    let row = effortMap.get(e);
+    if (!row) {
+      row = { effort: e, prompts: 0, pricedPrompts: 0, steps: 0, usdSum: 0, drop5hSum: 0, measured5h: 0 };
+      effortMap.set(e, row);
+    }
+    row.prompts++;
+    row.steps += t.steps;
+    if (t.pricedSteps > 0) { row.pricedPrompts++; row.usdSum += t.usd; }
+    if (t.drop5hPp !== null) { row.measured5h++; row.drop5hSum += t.drop5hPp; }
+  }
+  const effortRows = [...effortMap.values()].sort((a, b) =>
+    (EFFORT_SORT_ORDER[a.effort] ?? 50) - (EFFORT_SORT_ORDER[b.effort] ?? 50));
+  const lowestEffortBase = effortRows.find(r => r.effort !== 'unspecified' && r.pricedPrompts > 0 && r.usdSum > 0)
+    ?? effortRows.find(r => r.pricedPrompts > 0 && r.usdSum > 0);
+  const effortBaseAvg = lowestEffortBase ? lowestEffortBase.usdSum / lowestEffortBase.pricedPrompts : null;
+  const byEffort = effortRows.map(r => {
+    const avgUsd = r.pricedPrompts > 0 ? r.usdSum / r.pricedPrompts : null;
+    return {
+      effort: r.effort,
+      prompts: r.prompts,
+      steps: r.steps,
+      avgStepsPerPrompt: r.prompts > 0 ? Number((r.steps / r.prompts).toFixed(1)) : null,
+      usd: r.pricedPrompts > 0 ? Number(r.usdSum.toFixed(4)) : null,
+      avgCostPerPromptUsd: avgUsd !== null ? Number(avgUsd.toFixed(4)) : null,
+      avg5hDropPp: r.measured5h > 0 ? Number((r.drop5hSum / r.measured5h).toFixed(3)) : null,
+      measured5h: r.measured5h,
+      multiplier: avgUsd !== null && effortBaseAvg && effortBaseAvg > 0 ? Number((avgUsd / effortBaseAvg).toFixed(1)) : null,
+    };
+  });
+
+  // 4. Heaviest Chats ranking
+  const topChats = [...chatAggs.values()]
+    .sort((a, b) => b.usd - a.usd || b.steps - a.steps)
+    .slice(0, 6)
+    .map(c => ({
+      reference: c.reference,
+      title: c.title,
+      project: c.project,
+      prompts: c.turns.size,
+      steps: c.steps,
+      usd: Number(c.usd.toFixed(4)),
+      sharePct: totalUsd > 0 ? Number(((c.usd / totalUsd) * 100).toFixed(1)) : null,
+      maxContextTokens: c.maxContextTokens,
+      drop5hPp: c.drop5hSum > 0 ? Number(c.drop5hSum.toFixed(2)) : null,
+    }));
+
   const projects = [...byProject.values()]
     .sort((a, b) => b.usd - a.usd || b.requests - a.requests)
     .slice(0, 6)
@@ -384,6 +566,7 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     avgWeekPerSessionPp: avg(sessionDropsWeek),
     measuredWeekSessions: sessionDropsWeek.size,
     avgCostPerSessionUsd: sessionCount > 0 && apiCost.usd !== null ? Number((apiCost.usd / sessionCount).toFixed(4)) : null,
+    avgStepsPerTurn: turnCount > 0 ? Number((summary.observedRequests / turnCount).toFixed(1)) : null,
     sessionCount,
   };
 
@@ -400,7 +583,11 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     quotaAverages,
     byModel: models,
     byModelEffort,
+    byEffort,
     byProject: projects,
+    topPrompts,
+    contextBuckets,
+    topChats,
     series,
   };
 }
@@ -412,8 +599,10 @@ export function analyticsSummary(history, until, provider = 'codex', live = [], 
     if (p?.reference && p?.name) projectNames.set(p.reference, p.name);
   }
   const sessionProjects = new Map();
+  const sessionTitles = new Map();
   for (const s of history.sessionCatalog ?? []) {
     if (s?.reference && s?.projectReference) sessionProjects.set(s.reference, s.projectReference);
+    if (s?.reference && (s.nativeTitle || s.title)) sessionTitles.set(s.reference, s.nativeTitle || s.title);
   }
 
   // Compute quota impact per active turn in the 30-day window so averages & model comparisons include real 5h/weekly drops
@@ -447,9 +636,9 @@ export function analyticsSummary(history, until, provider = 'codex', live = [], 
   return {
     catalog: pricingCatalogStatus(),
     periods: {
-      '24h': buildPeriodAnalytics(sameRequests, history, until - 24 * 3_600_000, until, provider, 'hour', projectNames, sessionProjects, turnQuotaMap),
-      '7d': buildPeriodAnalytics(sameRequests, history, until - 7 * 86_400_000, until, provider, '7d', projectNames, sessionProjects, turnQuotaMap),
-      '30d': buildPeriodAnalytics(sameRequests, history, until - 30 * 86_400_000, until, provider, '30d', projectNames, sessionProjects, turnQuotaMap),
+      '24h': buildPeriodAnalytics(sameRequests, history, until - 24 * 3_600_000, until, provider, 'hour', projectNames, sessionProjects, sessionTitles, turnQuotaMap),
+      '7d': buildPeriodAnalytics(sameRequests, history, until - 7 * 86_400_000, until, provider, '7d', projectNames, sessionProjects, sessionTitles, turnQuotaMap),
+      '30d': buildPeriodAnalytics(sameRequests, history, until - 30 * 86_400_000, until, provider, '30d', projectNames, sessionProjects, sessionTitles, turnQuotaMap),
     },
   };
 }
