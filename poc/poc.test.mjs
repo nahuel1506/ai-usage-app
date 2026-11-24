@@ -8,7 +8,7 @@ import { zstdCompressSync } from 'node:zlib';
 import { prepareProjectIndex, projectPath, sessionProject } from './projects.mjs';
 import { recordedQuotaPoints, readQuotaRecordings, recordingScope } from './quota-recordings.mjs';
 import { windowsFrom } from './app-server.mjs';
-import { changesBetween, interactionSummary, reconcile, requestSummary } from './report.mjs';
+import { analyticsSummary, changesBetween, interactionSummary, reconcile, requestSummary } from './report.mjs';
 import { recentHistory, summarizeRollout } from './rollouts.mjs';
 import { interactionQuota, liveQuotaPoints, quotaObservations } from './interaction-quota.mjs';
 
@@ -18,6 +18,44 @@ const sample = (seconds, window, accountId = 'test-account') => ({
   accountId, sample: { plan: 'plus', observedAt: at(seconds), windows: [window] },
 });
 const emptyHistory = { turns: new Map(), requests: new Map(), snapshots: [] };
+
+test('cuenta tokens de caché una sola vez y conserva la cobertura de los totales', () => {
+  const usage = [
+    { input_tokens: 100, cached_input_tokens: 70, output_tokens: 20 },
+    { input_tokens: 100, cached_input_tokens: 70, output_tokens: 20, total_tokens: 122 },
+    { input_tokens: 100 },
+  ];
+  const history = { ...emptyHistory, requests: new Map(usage.map((value, i) => [i, {
+    time: Date.parse(at(i + 1)), scope: 'same', usage: value,
+  }])) };
+  for (const [provider, expected] of [['codex', 242], ['antigravity', 312]]) {
+    const { sameAccount } = requestSummary(history, Date.parse(at(0)), Date.parse(at(10)), provider);
+    assert.equal(sameAccount.tokensObserved, expected);
+    assert.equal(sameAccount.tokenSamples, 2);
+  }
+});
+
+test('estima un rango con prompts aislados del plan actual y excluye envíos combinados', () => {
+  const history = { turns: new Map(), requests: new Map(), snapshots: [] };
+  for (let i = 1, used = 0; i <= 10; i++) {
+    const start = i * 250;
+    const plan = i === 1 ? 'old-plan' : 'plus';
+    const time = offset => Date.parse(at(start + offset));
+    const key = String(i);
+    const messages = new Map([['first', { time: time(0) }]]);
+    if (i === 2) messages.set('second', { time: time(1) });
+    history.turns.set(key, { key, scope: 'same', composer: true, messages,
+      started: time(0), ended: time(10), first: time(2), last: time(8) });
+    history.requests.set(key, { turn: key, scope: 'same', time: time(8), usage: { input_tokens: 100 } });
+    for (const [offset, usedPercent] of [[-1, used], [11, used + i]]) {
+      history.snapshots.push({ ...row(usedPercent, at(3000)), time: time(offset),
+        source: 'app-server', scope: 'same', plan });
+    }
+    used += i;
+  }
+  const analytics = analyticsSummary(history, Date.parse(at(2800)));
+  assert.deepEqual(analytics.promptQuota, [{ pool: 'codex', minutes: 300, count: 8, typical: 6.5, low: 4.75, high: 8.25 }]);
+});
 
 test('cuotas por pool deduplican la copia principal y mantienen las ventanas devueltas', () => {
   const primary = { usedPercent: 0, windowDurationMins: 10080, resetsAt: 1767225660 };

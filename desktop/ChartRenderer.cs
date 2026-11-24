@@ -489,13 +489,14 @@ internal static class ChartRenderer
         {
             "avgTurn" => r.Number("avgCostPerTurnUsd"),
             "drop5h" => r.Number("avg5hDropPp"),
+            "dropWeek" => r.Number("avgWeekDropPp"),
             _ => r.Number("usd"),
         };
 
         string FormatMetric(double v) => metric switch
         {
             "avgTurn" => Formatters.Money(v) + "/prompt",
-            "drop5h" => "-" + v.ToString("0.##", Formatters.Locale) + " %/prompt",
+            "drop5h" or "dropWeek" => "Bajó " + Formatters.Percent(v) + "/prompt",
             _ => Formatters.Money(v),
         };
 

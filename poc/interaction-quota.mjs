@@ -181,7 +181,7 @@ function measureWindow(minutes, samples, turn, turnIndex, pool = null) {
   const deltaPp = Number((right.usedPercent - left.usedPercent).toFixed(6));
   const otherTurns = overlappingTurns(turnIndex, members, left.time, right.time);
   const status = !result.hasStart || !result.hasEnd ? 'partial' : otherTurns ? 'shared' : 'observed';
-  return { ...result, status, deltaPp, otherTurns, ...(fluctuated ? { fluctuated: true } : {}) };
+  return { ...result, status, deltaPp, otherTurns, plan: right.plan ?? left.plan, ...(fluctuated ? { fluctuated: true } : {}) };
 }
 
 export function interactionQuota(series, turn, history) {

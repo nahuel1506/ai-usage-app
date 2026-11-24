@@ -63,16 +63,30 @@ export function changesBetween(previous, current, history) {
   return changes;
 }
 
-function summarizeRequests(requests) {
+function requestTokens(usage, provider) {
+  if (Number.isFinite(usage.total_tokens)) return usage.total_tokens;
+  if (!Number.isFinite(usage.input_tokens) || !Number.isFinite(usage.output_tokens)) return null;
+  return usage.input_tokens + usage.output_tokens +
+    (provider === 'antigravity' ? (usage.cached_input_tokens ?? 0) : 0);
+}
+
+function summarizeRequests(requests, provider = 'codex') {
   const observedCounts = {};
   const fieldCoverage = {};
+  let tokensObserved = 0;
+  let tokenSamples = 0;
   for (const { usage } of requests) {
+    const total = requestTokens(usage, provider);
+    if (total !== null) {
+      tokensObserved += total;
+      tokenSamples++;
+    }
     for (const [field, value] of Object.entries(usage)) {
       observedCounts[field] = (observedCounts[field] ?? 0) + value;
       fieldCoverage[field] = (fieldCoverage[field] ?? 0) + 1;
     }
   }
-  return { observedRequests: requests.length, observedCounts, fieldCoverage };
+  return { observedRequests: requests.length, observedCounts, fieldCoverage, tokensObserved, tokenSamples };
 }
 
 export function requestSummary(history, since, until, provider = 'codex') {
@@ -85,8 +99,8 @@ export function requestSummary(history, since, until, provider = 'codex') {
   });
   return {
     since: new Date(since).toISOString(), until: new Date(until).toISOString(),
-    sameAccount: { ...summarizeRequests(sameRequests), apiCost: aggregateCosts(pricedSame) },
-    unverifiedAccount: summarizeRequests(requests.filter(row => row.scope !== 'same')),
+    sameAccount: { ...summarizeRequests(sameRequests, provider), apiCost: aggregateCosts(pricedSame) },
+    unverifiedAccount: summarizeRequests(requests.filter(row => row.scope !== 'same'), provider),
   };
 }
 
@@ -121,21 +135,32 @@ function resolveReqModel(req, turn) {
   return req.model ?? (turn?.models?.length === 1 ? turn.models[0] : null) ?? 'Sin identificar';
 }
 
-function pickQuotaDelta(quotaList, minutes, provider, modelName, observedOnly = false) {
+function pickQuotaDelta(quotaList, minutes, provider, modelName) {
   if (!Array.isArray(quotaList)) return null;
   const preferredPool = provider === 'antigravity'
-    ? (/claude|gpt/i.test(modelName || '') ? 'claude_gpt' : 'gemini')
+    ? (/gemini/i.test(modelName || '') ? 'gemini' : /claude|gpt/i.test(modelName || '') ? 'claude_gpt' : null)
     : null;
+  if (provider === 'antigravity' && !preferredPool) return null;
   const match = quotaList.find(q =>
     q.minutes === minutes && (preferredPool === null || q.pool === preferredPool));
   if (!match || typeof match.deltaPp !== 'number' || !Number.isFinite(match.deltaPp)) return null;
-  if (observedOnly ? match.status !== 'observed' : (match.status !== 'observed' && match.status !== 'shared')) return null;
+  if (match.status !== 'observed') return null;
   return match.deltaPp;
 }
 
 function buildModelEffortComparison(requests, history, provider, turnQuotaMap) {
   const groups = new Map();
   const byModel = new Map();
+  const turnLabels = new Map();
+  for (const req of requests) {
+    const turn = history.turns.get(req.turn);
+    const model = resolveReqModel(req, turn);
+    const effort = resolveReqEffort(req, turn);
+    const labels = turnLabels.get(req.turn) ?? { model, effort };
+    if (labels.model !== model) labels.model = null;
+    if (labels.effort !== effort) labels.effort = null;
+    turnLabels.set(req.turn, labels);
+  }
 
   for (const req of requests) {
     const turn = history.turns.get(req.turn);
@@ -148,9 +173,7 @@ function buildModelEffortComparison(requests, history, provider, turnQuotaMap) {
     const cacheRead = req.usage.cached_input_tokens ?? 0;
     const outTok = req.usage.output_tokens ?? 0;
     const reasonTok = req.usage.reasoning_output_tokens ?? 0;
-    const totalTok = (req.usage.input_tokens ?? 0)
-      + (provider === 'antigravity' ? cacheRead : 0)
-      + outTok;
+    const totalTok = requestTokens(req.usage, provider) ?? 0;
 
     const key = `${model}||${effort}`;
     let row = groups.get(key);
@@ -174,8 +197,9 @@ function buildModelEffortComparison(requests, history, provider, turnQuotaMap) {
       row.saved += saved;
       row.pricedRequests++;
     }
-    const q = turnQuotaMap?.get(req.turn);
-    if (q) {
+    const labels = turnLabels.get(req.turn);
+    const q = labels.model && model !== 'Sin identificar' ? turnQuotaMap?.get(req.turn) : null;
+    if (q && labels.effort) {
       if (!row.drop5hTurns.has(req.turn)) {
         const d5 = pickQuotaDelta(q, 300, provider, model);
         if (d5 !== null) { row.drop5hSum += d5; row.drop5hTurns.add(req.turn); }
@@ -327,9 +351,7 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     const ctxTokens = priced.available
       ? priced.contextTokens
       : (req.usage.input_tokens ?? 0) + (provider === 'antigravity' ? (req.usage.cached_input_tokens ?? 0) : 0);
-    const totalTok = (req.usage.input_tokens ?? 0)
-      + (provider === 'antigravity' ? (req.usage.cached_input_tokens ?? 0) : 0)
-      + (req.usage.output_tokens ?? 0);
+    const totalTok = requestTokens(req.usage, provider) ?? 0;
 
     const projRef = sessionRef ? sessionProjects.get(sessionRef) : null;
     const projName = (projRef && projectNames.get(projRef)) || 'Sin proyecto';
@@ -425,7 +447,7 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     }
   }
 
-  const summary = summarizeRequests(filtered);
+  const summary = summarizeRequests(filtered, provider);
   const apiCost = aggregateCosts(pricedList);
   const totalUsd = apiCost.usd ?? 0;
   const outTotal = summary.observedCounts.output_tokens ?? 0;
@@ -567,9 +589,9 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     if (t.pricedSteps !== t.steps || t.usd <= 0) continue;
     const q = turnQuotaMap?.get(t.reference);
     if (!q) continue;
-    const obs5 = pickQuotaDelta(q, 300, provider, t.model, true);
+    const obs5 = pickQuotaDelta(q, 300, provider, t.model);
     if (obs5 !== null && obs5 > 0) { cal5hUsd += t.usd; cal5hDrop += obs5; cal5hCount++; }
-    const obsW = pickQuotaDelta(q, 10080, provider, t.model, true);
+    const obsW = pickQuotaDelta(q, 10080, provider, t.model);
     if (obsW !== null && obsW > 0) { calWUsd += t.usd; calWDrop += obsW; calWCount++; }
   }
 
@@ -601,6 +623,8 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     observedTurns: turnCount,
     observedSessions: sessionCount,
     observedCounts: summary.observedCounts,
+    tokensObserved: summary.tokensObserved,
+    tokenSamples: summary.tokenSamples,
     apiCost,
     avgCostPerTurnUsd,
     reasoningPct,
@@ -659,6 +683,7 @@ export function analyticsSummary(history, until, provider = 'codex', live = [], 
 
   return {
     catalog: pricingCatalogStatus(),
+    promptQuota: hasAnyQuota ? promptQuotaProfile(series, history, until, provider) : [],
     periods: {
       '24h': buildPeriodAnalytics(sameRequests, history, until - 24 * 3_600_000, until, provider, 'hour', projectNames, sessionProjects, sessionTitles, turnQuotaMap),
       '7d': buildPeriodAnalytics(sameRequests, history, until - 7 * 86_400_000, until, provider, '7d', projectNames, sessionProjects, sessionTitles, turnQuotaMap),
@@ -701,6 +726,51 @@ function interactionGroups(history, since, until) {
     groupFor(request.turn).requests.push(request);
   }
   return [...groups.values()];
+}
+
+function promptQuotaProfile(series, history, until, provider) {
+  const cutoff = until - 30 * 86_400_000;
+  const pools = new Map();
+  const codexPlan = series.get(300)?.findLast(sample => sample.source === 'app-server')?.plan
+    ?? series.get(10080)?.findLast(sample => sample.source === 'app-server')?.plan;
+  const groups = interactionGroups(history, cutoff, until).flatMap(({ reference, members, requests }) => {
+    const turn = history.turns.get(reference);
+    if (!turn || !isQuestion(turn) || !requests.length || (turn.messages?.size ?? 0) > 1) return [];
+    const sent = [...(turn.messages?.values() ?? [])][0]?.time ?? turn.started;
+    const ends = [...members].map(key => history.turns.get(key)?.ended);
+    if (!Number.isFinite(sent) || sent < cutoff || !ends.every(end => Number.isFinite(end) && end <= until)) return [];
+    const models = requests.map(req => resolveReqModel(req, history.turns.get(req.turn)));
+    const modelPools = new Set(models.map(model => /gemini/i.test(model) ? 'gemini' :
+      /claude|gpt/i.test(model) ? 'claude_gpt' : null));
+    const pool = provider === 'codex' ? 'codex' : modelPools.size === 1 ? [...modelPools][0] : null;
+    if (!pool) return [];
+    const end = Math.max(...ends);
+    return [{ pool, reference, members, startedAt: new Date(sent).toISOString(), endedAt: new Date(end).toISOString(),
+      lastRequest: Math.max(...requests.map(req => req.time)), end }];
+  }).sort((a, b) => b.end - a.end);
+  for (const turn of groups) {
+    for (const impact of interactionQuota(series, turn, history)) {
+      if ((impact.pool ?? 'codex') !== turn.pool || impact.status !== 'observed' || !(impact.deltaPp > 0)) continue;
+      if (codexPlan && impact.plan !== codexPlan) continue;
+      if (provider === 'antigravity' && (impact.before.source !== 'agy-cli' || impact.after.source !== 'agy-cli')) continue;
+      const key = `${turn.pool}/${impact.minutes}`;
+      const samples = pools.get(key) ?? { pool: turn.pool, minutes: impact.minutes, drops: [], nextStart: Infinity };
+      const before = Date.parse(impact.before.at);
+      if (samples.drops.length >= 60 || Date.parse(impact.after.at) > samples.nextStart) continue;
+      samples.drops.push(impact.deltaPp);
+      samples.nextStart = before;
+      pools.set(key, samples);
+    }
+  }
+  return [...pools.values()].map(({ pool, minutes, drops }) => {
+    drops.sort((a, b) => a - b);
+    const quantile = q => {
+      const index = (drops.length - 1) * q;
+      const low = Math.floor(index);
+      return drops[low] + (drops[Math.ceil(index)] - drops[low]) * (index - low);
+    };
+    return { pool, minutes, count: drops.length, typical: quantile(0.5), low: quantile(0.25), high: quantile(0.75) };
+  });
 }
 
 export function interactionSummary(history, since, until, live = [], bySession = false, quotaOptions = undefined) {
@@ -752,7 +822,7 @@ export function interactionSummary(history, since, until, live = [], bySession =
       durationMs: knownEnd === null ? null : members.size > 1 && started !== null ? knownEnd - started : turn?.durationMs ?? null,
       configuredModels: turn?.models ?? [],
       reasoningEfforts: turn?.efforts ?? [],
-      ...summarizeRequests(requests),
+      ...summarizeRequests(requests, provider),
       apiCost,
       additionalRequests: requests.length - Number(Boolean(firstMain)),
       childRequests: requests.filter(request => request.turn !== reference).length,

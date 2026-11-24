@@ -27,7 +27,7 @@ public partial class MainWindow : Window
     private ProviderKind activeProvider = ProviderKind.Codex;
     private string activePage = "overview";
     private string activePeriod = "24h";
-    private string activeComparisonMetric = "avgTurn";
+    private string activeComparisonMetric = "drop5h";
     private bool isDarkTheme;
     private bool closing;
     private bool closeReady;
@@ -184,7 +184,7 @@ public partial class MainWindow : Window
         ShortQuota.Text = WeekQuota.Text = AltShortQuota.Text = AltWeekQuota.Text = "—";
         ShortBar.Value = WeekBar.Value = AltShortBar.Value = AltWeekBar.Value = 0;
         ShortReset.Text = WeekReset.Text = AltShortReset.Text = AltWeekReset.Text = "Sin datos";
-        ShortAutonomy.Visibility = WeekAutonomy.Visibility = Visibility.Collapsed;
+        ShortAutonomy.Visibility = WeekAutonomy.Visibility = AltShortAutonomy.Visibility = AltWeekAutonomy.Visibility = Visibility.Collapsed;
         ApiCostValue.Text = QuotaRateValue.Text = CacheSavingsValue.Text = PaceValue.Text = "—";
         CacheHitRateLabel.Text = "";
         CacheHitBar.Value = 0;
@@ -232,7 +232,7 @@ public partial class MainWindow : Window
     {
         var activeBg = (Brush)Application.Current.Resources["AccentPrimary"];
         var mutedFg = (Brush)Application.Current.Resources["TextMuted"];
-        foreach (var btn in new[] { MetricAvgTurnBtn, MetricUsdBtn, MetricDrop5hBtn })
+        foreach (var btn in new[] { MetricDrop5hBtn, MetricDropWeekBtn, MetricAvgTurnBtn, MetricUsdBtn })
         {
             var selected = Equals(btn.Tag, activeComparisonMetric);
             btn.Background = selected ? activeBg : Brushes.Transparent;
@@ -463,29 +463,34 @@ public partial class MainWindow : Window
     private void UpdateAutonomyEstimates(ProviderState state, QuotaSample sample)
     {
         var isCodex = state.Kind == ProviderKind.Codex;
-        var p30 = state.CurrentAnalytics.Get("periods").Get("30d").Get("quotaAverages");
-        var avg5h = p30.Number("avg5hPerTurnPp");
-        var avgWeek = p30.Number("avgWeekPerTurnPp");
-        var left5h = isCodex ? sample.Left(300) : sample.Left(300, "gemini");
-        var leftWeek = isCodex ? sample.Left(10080) : sample.Left(10080, "gemini");
-
-        if (left5h.HasValue && avg5h is > 0.01)
+        var source = state.CurrentAnalytics.Rows("promptQuota").ToArray();
+        SetAutonomyEstimate(source, isCodex ? "codex" : "gemini", 300, sample, ShortAutonomy);
+        SetAutonomyEstimate(source, isCodex ? "codex" : "gemini", 10080, sample, WeekAutonomy);
+        if (!isCodex)
         {
-            var est = (int)Math.Floor(left5h.Value / avg5h.Value);
-            ShortAutonomy.Text = $"≈ {Number(est)} prompts restantes";
-            ShortAutonomy.ToolTip = $"Calculado con tu baja promedio real ({Percent(avg5h)}/prompt en {p30.Count("measured5hTurns")} prompts medidos).";
-            ShortAutonomy.Visibility = Visibility.Visible;
+            SetAutonomyEstimate(source, "claude_gpt", 300, sample, AltShortAutonomy);
+            SetAutonomyEstimate(source, "claude_gpt", 10080, sample, AltWeekAutonomy);
         }
-        else ShortAutonomy.Visibility = Visibility.Collapsed;
+    }
 
-        if (leftWeek.HasValue && avgWeek is > 0.01)
+    private static void SetAutonomyEstimate(JsonElement[] profiles, string pool, int minutes, QuotaSample sample, TextBlock text)
+    {
+        var profile = profiles.FirstOrDefault(row => row.Text("pool") == pool && row.Count("minutes") == minutes);
+        var count = profile.Count("count") ?? 0;
+        var left = sample.Left(minutes, pool == "codex" ? null : pool);
+        var low = profile.Number("low");
+        var high = profile.Number("high");
+        text.Visibility = left.HasValue ? Visibility.Visible : Visibility.Collapsed;
+        if (!left.HasValue || count < 8 || low is not > 0 || high is not > 0)
         {
-            var est = (int)Math.Floor(leftWeek.Value / avgWeek.Value);
-            WeekAutonomy.Text = $"≈ {Number(est)} prompts restantes";
-            WeekAutonomy.ToolTip = $"Calculado con tu baja promedio semanal ({Percent(avgWeek)}/prompt en {p30.Count("measuredWeekTurns")} prompts medidos).";
-            WeekAutonomy.Visibility = Visibility.Visible;
+            text.Text = "Estimación sin muestra suficiente";
+            text.ToolTip = $"{Number(count)} prompts aislados con baja medible. Mínimo 8 para estimar.";
+            return;
         }
-        else WeekAutonomy.Visibility = Visibility.Collapsed;
+        var fewer = (long)Math.Floor(left.Value / high.Value);
+        var more = (long)Math.Floor(left.Value / low.Value);
+        text.Text = fewer == more ? $"≈ {Number(fewer)} prompts restantes" : $"≈ {Number(fewer)}–{Number(more)} prompts restantes";
+        text.ToolTip = $"Baja típica por prompt: {Percent(profile.Number("typical"))}. Rango basado en el 50 % central de {Number(count)} prompts aislados con baja medible (últimos 30 días). Si aplican ambas ventanas, rige la que se agote primero.";
     }
 
     private void UpdateSourcesView(ProviderState state, QuotaSample sample)
@@ -662,7 +667,10 @@ public partial class MainWindow : Window
         AvgCostTurnSub.Text = $"{Number(promptCount)} prompts · {avgSteps?.ToString("0.#", Locale) ?? "—"} pasos/prompt";
 
         var rows = period.Rows("byModelEffort").ToList();
-        AnalyticsCoverage.Text = $"{Number(chatCount)} chats · {Number(promptCount)} prompts";
+        var measuredTokens = period.Count("tokenSamples") ?? 0;
+        var tokens = measuredTokens == 0 ? "Sin tokens medidos" : $"{ShortNumber(period.Count("tokensObserved"))} tokens";
+        AnalyticsCoverage.Text = $"{tokens} · {Number(chatCount)} chats · {Number(promptCount)} prompts";
+        AnalyticsCoverage.ToolTip = $"{Number(measuredTokens)} de {Number(period.Count("observedRequests"))} pasos con total de tokens";
         ModelEffortGrid.ItemsSource = FormatComparisonRows(rows);
 
         if (ContextImpactChart.IsVisible)
@@ -683,7 +691,7 @@ public partial class MainWindow : Window
         SessionCompChartPanel.Visibility = compRows.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
         SessionCompGrid.ItemsSource = FormatComparisonRows(compRows);
         if (SessionCompChart.IsVisible)
-            ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, compRows, "avgTurn");
+            ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, compRows, "drop5h");
     }
 
     private static List<object> FormatComparisonRows(IEnumerable<JsonElement> rows) =>
@@ -1002,9 +1010,9 @@ public partial class MainWindow : Window
         var effortRank = efforts.Select(EffortOrder).Max();
         var calls = turn.Count("observedRequests");
 
-        var counts = turn.Get("observedCounts");
-        var totalTokens = (counts.Count("input_tokens") ?? 0) + (counts.Count("cached_input_tokens") ?? 0) + (counts.Count("output_tokens") ?? 0);
-        var tokensShort = totalTokens > 0 ? ShortNumber(totalTokens) : "—";
+        var totalTokens = turn.Count("tokensObserved") ?? 0;
+        var tokenSamples = turn.Count("tokenSamples") ?? 0;
+        var tokensShort = tokenSamples == 0 ? "—" : ShortNumber(totalTokens) + (tokenSamples < calls ? " · parcial" : "");
 
         var apiCost = turn.Get("apiCost");
         var costUsd = apiCost.Number("usd");
@@ -1046,7 +1054,7 @@ public partial class MainWindow : Window
                     + "La cuota fluctuó entre lecturas. Se muestra la baja neta.";
             yield return new InteractionRow(
                 $"{reference}:{index}", time, time is { } stamp ? LocalTime(stamp) : "—", label, model, effort, calls,
-                tokensShort, totalTokens,
+                combined ? "—" : tokensShort, totalTokens,
                 costText, combined ? null : costUsd, combined ? "Costo conjunto en el detalle." : costHint,
                 Percent(beforeValue), Percent(afterValue), Percent(dropValue),
                 combined ? "—" : Number(calls),
@@ -1068,7 +1076,7 @@ public partial class MainWindow : Window
         interactionSortDirection = interactionSortColumn == column
             ? interactionSortDirection == ListSortDirection.Descending ? ListSortDirection.Ascending : ListSortDirection.Descending
             : column is nameof(InteractionRow.At) or nameof(InteractionRow.CostUsd) or nameof(InteractionRow.Before) or nameof(InteractionRow.After)
-                or nameof(InteractionRow.Drop) or nameof(InteractionRow.Calls)
+                or nameof(InteractionRow.Drop) or nameof(InteractionRow.Calls) or nameof(InteractionRow.TotalTokens)
                 ? ListSortDirection.Descending : ListSortDirection.Ascending;
         interactionSortColumn = column;
         RenderInteractions(preserveScroll: false);
@@ -1106,6 +1114,7 @@ public partial class MainWindow : Window
         nameof(InteractionRow.After) => SortRows(rows, row => row.AfterValue),
         nameof(InteractionRow.Drop) => SortRows(rows, row => row.DropValue),
         nameof(InteractionRow.Calls) => SortRows(rows, row => row.Calls == "—" ? null : row.Count),
+        nameof(InteractionRow.TotalTokens) => SortRows(rows, row => row.TokensShort == "—" ? (long?)null : row.TotalTokens),
         nameof(InteractionRow.Measurement) => SortRows(rows, row => row.Measurement, TextOrder),
         _ => SortRows(rows, row => row.At),
     };
@@ -1157,10 +1166,15 @@ public partial class MainWindow : Window
         AddChip("Pasos del modelo", Number(steps));
 
         var counts = turn.Get("observedCounts");
-        InteractionTokens.Text = $"In {ShortNumber(counts.Count("input_tokens"))} · Caché {ShortNumber(counts.Count("cached_input_tokens"))} · Out {ShortNumber(counts.Count("output_tokens"))} · Razonam. {ShortNumber(counts.Count("reasoning_output_tokens"))}";
+        var counted = turn.Count("tokenSamples") ?? 0;
+        InteractionTokens.Text = counted == 0 ? "Sin total de tokens" :
+            $"{ShortNumber(row.TotalTokens)} tokens" + (counted < steps ? " · parcial" : "");
+        InteractionTokens.ToolTip = $"{Number(counted)} de {Number(steps)} pasos con total"
+            + $"\nEntrada {Number(counts.Count("input_tokens"))} · Caché {Number(counts.Count("cached_input_tokens"))}"
+            + $"\nSalida {Number(counts.Count("output_tokens"))} · Razonamiento {Number(counts.Count("reasoning_output_tokens"))}";
 
-        var vIn = Math.Max(0, counts.Count("input_tokens") ?? 0);
         var vCache = Math.Max(0, counts.Count("cached_input_tokens") ?? 0);
+        var vIn = Math.Max(0, (counts.Count("input_tokens") ?? 0) - (activeProvider == ProviderKind.Codex ? vCache : 0));
         var vReason = Math.Max(0, counts.Count("reasoning_output_tokens") ?? 0);
         var vOut = Math.Max(0, (counts.Count("output_tokens") ?? 0) - vReason);
         if (vIn + vCache + vOut + vReason > 0)
@@ -1454,7 +1468,7 @@ public partial class MainWindow : Window
         if (SessionCompChart.IsVisible)
         {
             var comp = Current.CurrentInteractions.Rows("sessionModelComparison");
-            ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, comp, "avgTurn");
+            ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, comp, "drop5h");
         }
         DrawVisibleCharts();
     }
