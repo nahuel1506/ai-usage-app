@@ -598,3 +598,70 @@ test('detecta mensajes de usuario sin content_item_metadata, envíos en medio de
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test('oculta subagentes guardian de Codex del catálogo, recupera chats legacy verificados por thread/list y filtra bloques ambientales', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'ai-usage-codex-subagent-test-'));
+  try {
+    const sessions = join(home, 'sessions');
+    await mkdir(sessions);
+    const line = (type, seconds, payload) => JSON.stringify({ type, timestamp: at(seconds), payload });
+
+    // 1. Legacy parent chat WITHOUT creator_account_id (verified via projectIndex.threads)
+    await writeFile(join(sessions, 'rollout-parent.jsonl'), [
+      line('session_meta', 0, { id: 'thread-parent', source: 'vscode' }),
+      line('event_msg', 10, { type: 'task_started', turn_id: 't1', root_turn_id: 't1', turn_attribution: { turn_trigger: 'composer' } }),
+      line('response_item', 11, {
+        type: 'message', role: 'user', id: 'm-amb',
+        content: [{ type: 'input_text', text: '<in-app-browser-context source="ambient-ui-state">This block is automatically supplied</in-app-browser-context>' }],
+        internal_chat_message_metadata_passthrough: { turn_id: 't1', content_item_kinds: ['user.text'] },
+      }),
+      line('response_item', 12, {
+        type: 'message', role: 'user', id: 'm-real',
+        content: [{ type: 'input_text', text: 'Explicar sistemas distribuidos' }],
+        internal_chat_message_metadata_passthrough: { turn_id: 't1', content_item_kinds: ['user.text'] },
+      }),
+      line('token_usage_record', 13, { turn_id: 't1', root_turn_id: 't1', response_id: 'r-parent', usage: { input_tokens: 100, output_tokens: 20 } }),
+      line('event_msg', 18, { type: 'task_complete', turn_id: 't1' }),
+    ].join('\n') + '\n');
+
+    // 2. Guardian subagent rollout with creator_account_id & parent_thread_id
+    await writeFile(join(sessions, 'rollout-guardian.jsonl'), [
+      line('session_meta', 14, {
+        id: 'thread-guardian', parent_thread_id: 'thread-parent',
+        creator_account_id: 'account-a', source: { subagent: { other: 'guardian' } },
+      }),
+      line('token_usage_record', 15, { turn_id: 't-sub', root_turn_id: 't1', response_id: 'r-sub', usage: { input_tokens: 40, output_tokens: 10 } }),
+      line('event_msg', 16, { type: 'task_complete', turn_id: 't-sub' }),
+    ].join('\n') + '\n');
+
+    // 3. Foreign account rollout must still be excluded even if listed
+    await writeFile(join(sessions, 'rollout-foreign.jsonl'), [
+      line('session_meta', 20, { id: 'thread-foreign', creator_account_id: 'other-account', source: 'vscode' }),
+      line('token_usage_record', 21, { turn_id: 'tf', response_id: 'rf', usage: { input_tokens: 50 } }),
+    ].join('\n') + '\n');
+
+    const salt = Buffer.alloc(32);
+    const projectIndex = prepareProjectIndex({
+      projects: [],
+      threads: [
+        { id: 'thread-parent', name: 'Chat real', updatedAt: Date.parse(at(25)) / 1000 },
+        { id: 'thread-foreign', name: 'Otro usuario', updatedAt: Date.parse(at(26)) / 1000 },
+      ],
+    }, salt);
+    const ws = { selected: null, cache: new Map(), recentCache: new Map(), headerCache: new Map(), projectIndex };
+    const hist = await recentHistory(home, 'account-a', salt, true, ws);
+
+    // Only the 1 real parent chat should appear in sessionCatalog (no guardian subagent, no foreign account)
+    assert.equal(hist.sessionCatalog.length, 1);
+    assert.equal(hist.sessionCatalog[0].nativeTitle, 'Chat real');
+
+    const det = interactionSummary(hist, Date.parse(at(0)), Date.parse(at(30)), [], true);
+    assert.equal(det.observedQuestions, 1);
+    assert.equal(det.turns[0].promptPreview, 'Explicar sistemas distribuidos');
+    assert.equal(det.turns[0].messageCount, 1);
+    assert.equal(det.turns[0].observedRequests, 2);
+    assert.equal(det.turns[0].childRequests, 1);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});

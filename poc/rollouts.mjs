@@ -69,15 +69,41 @@ function sessionReference(salt, thread) {
     ? createHmac('sha256', salt).update('session/' + thread).digest('hex').slice(0, 16) : null;
 }
 
+function parentThreadOf(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+  if (typeof meta.parent_thread_id === 'string' && meta.parent_thread_id.trim()) return meta.parent_thread_id.trim();
+  const spawnParent = typeof meta.source === 'object' ? meta.source?.subagent?.thread_spawn?.parent_thread_id : null;
+  if (typeof spawnParent === 'string' && spawnParent.trim()) return spawnParent.trim();
+  return null;
+}
+
+function isSubagentMeta(meta) {
+  if (!meta || typeof meta !== 'object') return false;
+  return Boolean((typeof meta.source === 'object' && meta.source?.subagent) || parentThreadOf(meta));
+}
+
+const AMBIENT_BLOCK_RE = /^\s*<(?:in-app-browser-context|environment_context|instructions|turn_aborted|system[_-]instruction)\b/i;
+
+function isAmbientUserText(text) {
+  return typeof text === 'string' && AMBIENT_BLOCK_RE.test(text);
+}
+
 function addLabels(previous, next) {
   return [...new Set([...(previous ?? []), ...(next ?? [])].filter(Boolean))];
 }
 
-function createRolloutReader(head, accountId, salt, includePreviews) {
+function createRolloutReader(head, accountId, salt, includePreviews, verifiedThreads = null) {
   const meta = sessionMetadata(head);
   const owner = meta?.creator_account_id;
-  const scope = !owner || !accountId ? 'unverified' : owner === accountId ? 'same' : 'different';
   const thread = meta?.id ?? meta?.session_id;
+  const parentThread = parentThreadOf(meta);
+  const isSubagent = isSubagentMeta(meta);
+  const verifiedByCatalog = Boolean(
+    accountId && verifiedThreads && ((thread && verifiedThreads.has(thread)) || (parentThread && verifiedThreads.has(parentThread))),
+  );
+  const scope = owner
+    ? (!accountId ? 'unverified' : owner === accountId ? 'same' : 'different')
+    : verifiedByCatalog ? 'same' : 'unverified';
   const turns = new Map();
   const requests = new Map();
   const snapshots = [];
@@ -137,7 +163,11 @@ function createRolloutReader(head, accountId, salt, includePreviews) {
     if (isEnd && activeTurnId === turnId) activeTurnId = null;
 
     const key = reference(threadId + '/' + turnId);
-    const turn = turns.get(key) ?? { key, session: sessionReference(salt, threadId), scope, started: null, ended: null, first: Infinity, last: -Infinity };
+    const effectiveSession = sessionReference(salt, parentThread ?? threadId);
+    const turn = turns.get(key) ?? {
+      key, session: effectiveSession, scope, started: null, ended: null, first: Infinity, last: -Infinity,
+      ...(isSubagent ? { child: true } : {}),
+    };
     if (!isContext && !isUser) {
       turn.first = Math.min(turn.first, time);
       turn.last = Math.max(turn.last, time);
@@ -156,24 +186,24 @@ function createRolloutReader(head, accountId, salt, includePreviews) {
       turn.composer = attribution?.turn_trigger === 'composer';
     }
     if (isUser) {
-      const msgKey = reference('message/' + (payload.id ?? turnId + '/' + time));
-      turn.messages ??= new Map();
-      let preview;
-      if (includePreviews && scope === 'same') {
-        let text = '';
-        if (isEventUser) {
-          const rawText = typeof payload.message === 'string' ? payload.message
-            : typeof payload.text === 'string' ? payload.text : '';
-          text = rawText.slice(0, 180).replace(/\s+/g, ' ').trim();
-        } else {
-          text = userItems.flatMap(index => {
-            const item = payload.content?.[index];
-            return item?.type === 'input_text' && typeof item.text === 'string' ? [item.text.slice(0, 180)] : [];
-          }).join(' ').replace(/\s+/g, ' ').trim();
+      const userTexts = isEventUser
+        ? [typeof payload.message === 'string' ? payload.message : typeof payload.text === 'string' ? payload.text : '']
+        : userItems.flatMap(index => {
+          const item = payload.content?.[index];
+          return item?.type === 'input_text' && typeof item.text === 'string' ? [item.text] : [];
+        });
+      const nonAmbient = userTexts.filter(t => t && !isAmbientUserText(t));
+      const allAmbient = userTexts.length > 0 && nonAmbient.length === 0;
+      if (!allAmbient) {
+        const msgKey = reference('message/' + (payload.id ?? turnId + '/' + time));
+        turn.messages ??= new Map();
+        let preview;
+        if (includePreviews && scope === 'same') {
+          const text = nonAmbient.map(t => t.slice(0, 180)).join(' ').replace(/\s+/g, ' ').trim();
+          preview = text.length > 96 ? text.slice(0, 96).trimEnd() + '…' : text || undefined;
         }
-        preview = text.length > 96 ? text.slice(0, 96).trimEnd() + '…' : text || undefined;
+        if (!turn.messages.has(msgKey) || preview) turn.messages.set(msgKey, { time, preview });
       }
-      if (!turn.messages.has(msgKey) || preview) turn.messages.set(msgKey, { time, preview });
     }
     if (isEnd && (turn.ended === null || time >= turn.ended)) {
       turn.ended = time;
@@ -213,12 +243,19 @@ function createRolloutReader(head, accountId, salt, includePreviews) {
   }
   return {
     add,
-    result: () => ({ session: sessionReference(salt, thread), sessionStartedAt: meta?.timestamp, scope, turns, requests, snapshots, malformed, omittedRequests }),
+    result: () => ({
+      session: sessionReference(salt, parentThread ?? thread),
+      ownSession: sessionReference(salt, thread),
+      isSubagent,
+      parentThread,
+      sessionStartedAt: meta?.timestamp,
+      scope, turns, requests, snapshots, malformed, omittedRequests,
+    }),
   };
 }
 
-export function summarizeRollout(head, lines, accountId, salt, includePreviews = false) {
-  const reader = createRolloutReader(head, accountId, salt, includePreviews);
+export function summarizeRollout(head, lines, accountId, salt, includePreviews = false, verifiedThreads = null) {
+  const reader = createRolloutReader(head, accountId, salt, includePreviews, verifiedThreads);
   for (const line of lines) reader.add(line);
   return reader.result();
 }
@@ -271,16 +308,20 @@ async function appendSession(state, path, size) {
   }
 }
 
-async function readSelectedRollout(entry, accountId, salt, includePreviews, cache) {
+async function readSelectedRollout(entry, accountId, salt, includePreviews, cache, verifiedThreads = null) {
   const info = await stat(entry.path);
   const compressed = entry.path.endsWith('.zst');
+  const verified = Boolean(accountId && verifiedThreads && (
+    (entry.thread && verifiedThreads.has(entry.thread)) || (entry.parentThread && verifiedThreads.has(entry.parentThread))
+  ));
   let state = cache.get(entry.path);
   if (!state || state.accountId !== accountId || state.includePreviews !== includePreviews
+      || state.verified !== verified
       || state.ino !== info.ino || (!compressed && info.size < state.cursor)
       || (compressed && (state.mtime !== info.mtimeMs || state.size !== info.size))) {
     state = {
-      cursor: 0, skippedLines: 0, accountId, includePreviews, ino: info.ino, mtime: -1, size: 0,
-      reader: createRolloutReader(entry.head, accountId, salt, includePreviews),
+      cursor: 0, skippedLines: 0, accountId, includePreviews, verified, ino: info.ino, mtime: -1, size: 0,
+      reader: createRolloutReader(entry.head, accountId, salt, includePreviews, verifiedThreads),
     };
     cache.set(entry.path, state);
   }
@@ -356,11 +397,17 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
   };
   const collected = [];
   const sessionFiles = new Map();
+  const verifiedThreads = workspace?.projectIndex?.threads ?? null;
   function register(absolute, mtime, head, partial) {
     const meta = sessionMetadata(head);
+    if (isSubagentMeta(meta)) return;
     const thread = meta?.id ?? meta?.session_id;
     const reference = sessionReference(salt, thread);
-    if (reference && accountId && meta?.creator_account_id === accountId) {
+    const owner = meta?.creator_account_id;
+    const owned = owner
+      ? Boolean(accountId && owner === accountId)
+      : Boolean(accountId && thread && verifiedThreads?.has(thread));
+    if (reference && owned) {
       sessionFiles.set(absolute, {
         path: absolute, head, thread, cwd: meta.cwd, reference, mtime,
         startedAt: meta.timestamp, partial,
@@ -403,16 +450,24 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
         continue;
       }
 
+      const head = await cachedHeader(file);
+      const headMeta = sessionMetadata(head);
+      const headThread = headMeta?.id ?? headMeta?.session_id;
+      const headParent = parentThreadOf(headMeta);
+      const verified = Boolean(accountId && verifiedThreads && (
+        (headThread && verifiedThreads.has(headThread)) || (headParent && verifiedThreads.has(headParent))
+      ));
+
       let state = recentCache?.get(absolute);
       const needsReset = !state || state.accountId !== accountId || state.includePreviews !== includePreviews
+        || state.verified !== verified
         || state.ino !== ino || (!compressed && size < state.cursor)
         || (compressed && (state.mtime !== mtime || state.size !== size));
 
       if (needsReset) {
-        const head = await cachedHeader(file);
         state = {
-          cursor: 0, skippedLines: 0, accountId, includePreviews, ino, mtime: -1, size: 0, head,
-          reader: createRolloutReader(head, accountId, salt, includePreviews),
+          cursor: 0, skippedLines: 0, accountId, includePreviews, verified, ino, mtime: -1, size: 0, head,
+          reader: createRolloutReader(head, accountId, salt, includePreviews, verifiedThreads),
         };
         recentCache?.set(absolute, state);
       }
@@ -472,7 +527,7 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
           continue;
         }
         try {
-          const full = await readSelectedRollout(entry, accountId, salt, includePreviews, workspace.cache);
+          const full = await readSelectedRollout(entry, accountId, salt, includePreviews, workspace.cache, verifiedThreads);
           partial ||= Boolean(full.skippedLines || full.malformed);
           const item = { path: entry.path, result: full, truncated: Boolean(full.skippedLines), full: true };
           if (existingIndex === -1) {
