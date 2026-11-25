@@ -533,3 +533,68 @@ test('un registro local que llega con retraso no invalida dos lecturas comparabl
   assert.equal(impact.status, 'observed');
   assert.equal(impact.deltaPp, 2);
 });
+
+test('detecta mensajes de usuario sin content_item_metadata, envíos en medio de un turno activo y plan semanal único', async () => {
+  const line = (type, seconds, payload) => JSON.stringify({ type, timestamp: at(seconds), payload });
+  const head = [line('session_meta', 0, { id: 'thread-steer', creator_account_id: 'account-a' })];
+  const parsed = summarizeRollout(head, [
+    line('event_msg', 10, { type: 'task_started', turn_id: 't1', root_turn_id: 't1', turn_attribution: { turn_trigger: 'composer' } }),
+    line('response_item', 11, {
+      type: 'message', role: 'user', id: 'm1',
+      content: [{ type: 'input_text', text: 'Primer mensaje sin metadata' }],
+      internal_chat_message_metadata_passthrough: { turn_id: 't1', content_item_kinds: ['user.text'] },
+    }),
+    line('token_usage_record', 12, { turn_id: 't1', response_id: 'r1', usage: { input_tokens: 50, output_tokens: 10 } }),
+    line('event_msg', 14, { type: 'user_message', id: 'm2', message: 'Mensaje en medio del turno activo' }),
+    line('token_usage_record', 16, { turn_id: 't1', response_id: 'r2', usage: { input_tokens: 80, output_tokens: 20 } }),
+    line('event_msg', 18, { type: 'task_complete', turn_id: 't1' }),
+  ], 'account-a', Buffer.alloc(32), true);
+  const det = interactionSummary(parsed, Date.parse(at(0)), Date.parse(at(30)), [], false);
+  assert.equal(det.observedQuestions, 1);
+  assert.equal(det.turns[0].promptPreview, 'Primer mensaje sin metadata');
+  assert.equal(det.turns[0].messageCount, 2);
+  assert.equal(det.turns[0].observedRequests, 2);
+
+  // Weekly-only legacy recording should verify against the weekly window when 5h is absent
+  const reset = at(600);
+  const weekObs = [{ ...row(20, reset), minutes: 10080, time: Date.parse(at(5)), scope: 'same' }];
+  const legacyWeeklyOnly = {
+    time: Date.parse(at(9)), accountComparable: true,
+    quota: { windows: [{ ...row(21, reset), minutes: 10080 }] },
+    reconciliation: [{
+      pool: 'codex', minutes: 10080,
+      historical: { source: 'codex-rollout', observedAt: at(5), resetsAt: reset, usedPercent: 20 },
+    }],
+  };
+  assert.equal(recordedQuotaPoints([legacyWeeklyOnly], 'account-scope', { snapshots: weekObs }).length, 1);
+
+  // Incremental cache detects appended bytes even when mtime stays identical (Windows NTFS behavior)
+  const home = await mkdtemp(join(tmpdir(), 'ai-usage-mtime-test-'));
+  try {
+    const sessions = join(home, 'sessions');
+    await mkdir(sessions);
+    const file = join(sessions, 'rollout-live.jsonl');
+    const stamp = new Date(Date.UTC(2026, 5, 1, 12, 0, 0));
+    await writeFile(file, [
+      head[0],
+      line('event_msg', 10, { type: 'task_started', turn_id: 't1', turn_attribution: { turn_trigger: 'composer' } }),
+      line('token_usage_record', 12, { turn_id: 't1', response_id: 'r1', usage: { input_tokens: 10 } }),
+    ].join('\n') + '\n');
+    await utimes(file, stamp, stamp);
+    const ws = { selected: null, cache: new Map(), recentCache: new Map(), headerCache: new Map() };
+    const h1 = await recentHistory(home, 'account-a', Buffer.alloc(32), true, ws);
+    assert.equal(h1.requests.size, 1);
+
+    await appendFile(file, [
+      line('event_msg', 14, { type: 'user_message', id: 'm2', message: 'Aclaración en vivo' }),
+      line('token_usage_record', 15, { turn_id: 't1', response_id: 'r2', usage: { input_tokens: 20 } }),
+    ].join('\n') + '\n');
+    await utimes(file, stamp, stamp); // Force identical mtime with larger size
+    const h2 = await recentHistory(home, 'account-a', Buffer.alloc(32), true, ws);
+    assert.equal(h2.requests.size, 2);
+    const [turn] = [...h2.turns.values()];
+    assert.equal(turn.messages.size, 1);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});

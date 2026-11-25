@@ -6,9 +6,9 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as wait } from 'node:timers/promises';
 
-const MAX_FILES = 32;
-const MAX_BYTES = 2 * 1024 * 1024;
-const MAX_CAPTURE_COUNT = 20_000;
+const MAX_FILES = 256;
+const MAX_BYTES = 4 * 1024 * 1024;
+const MAX_CAPTURE_COUNT = 50_000;
 const LEGACY_MAX_ANCHOR_AGE_MS = 300_000;
 const MAIN_WINDOWS = [300, 10080];
 
@@ -103,7 +103,10 @@ function evidenceKey(pool, minutes, time, usedPercent) {
 
 function legacyAgrees(record, evidence) {
   if (record.accountComparable !== true || !Array.isArray(record.reconciliation)) return false;
-  return MAIN_WINDOWS.every(minutes => {
+  const presentWindows = MAIN_WINDOWS.filter(minutes =>
+    record.quota.windows.some(row => row.pool === 'codex' && row.minutes === minutes));
+  if (presentWindows.length === 0) return false;
+  return presentWindows.every(minutes => {
     const current = record.quota.windows.filter(row => row.pool === 'codex' && row.minutes === minutes);
     const report = record.reconciliation.find(row => row.pool === 'codex' && row.minutes === minutes)?.historical;
     const time = Date.parse(report?.observedAt);

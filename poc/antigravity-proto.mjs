@@ -148,7 +148,9 @@ export function parseTrajectoryMeta(blob) {
   }
 
   const startedAt = top.find(item => item.field === 2 && item.wire === 2)?.buf;
+  const parentBuf = top.find(item => item.field === 5 && item.wire === 2)?.buf;
   const cascadeBuf = top.find(item => item.field === 6 && item.wire === 2)?.buf;
+  const nestingDepth = top.find(item => item.field === 17 && item.wire === 0)?.value ?? 0;
 
   return {
     workspaceUri: workspaceUri?.trim() || null,
@@ -156,7 +158,9 @@ export function parseTrajectoryMeta(blob) {
     repoName: repoName?.trim() || null,
     branch: branch?.trim() || null,
     startedAtMs: startedAt ? decodeTimestampMs(startedAt) : null,
+    parentConversationId: parentBuf ? decodeUtf8(parentBuf, 128)?.trim() || null : null,
     cascadeId: cascadeBuf ? decodeUtf8(cascadeBuf, 128)?.trim() || null : null,
+    nestingDepth: Number.isSafeInteger(nestingDepth) && nestingDepth > 0 ? nestingDepth : 0,
   };
 }
 

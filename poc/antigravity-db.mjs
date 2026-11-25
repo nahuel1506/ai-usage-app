@@ -18,10 +18,12 @@ import {
 } from './antigravity-proto.mjs';
 import { projectPath } from './projects.mjs';
 
-const MAX_DBS = 48;
+const MAX_DBS = 256;
 const STEP_USER_INPUT = 14;
 const STEP_PLANNER_RESPONSE = 15;
 const STEP_SUMMARY_CALL = 23;
+const STEP_INVOKE_SUBAGENT = 132;
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 function reference(salt, value) {
   return createHmac('sha256', salt).update(value).digest('hex').slice(0, 16);
@@ -60,16 +62,25 @@ function readConversationCatalog(home, salt, includePreviews) {
   let db;
   try {
     db = new DatabaseSync(join(home, 'conversation_summaries.db'), { readOnly: true });
+    const cols = new Set(db.prepare('PRAGMA table_info(conversation_summaries)').all().map(c => c.name));
     const title = includePreviews ? 'title' : 'NULL AS title';
+    const parentCol = cols.has('parent_conversation_id') ? 'parent_conversation_id' : 'NULL AS parent_conversation_id';
+    const depthCol = cols.has('nesting_depth') ? 'nesting_depth' : '0 AS nesting_depth';
     for (const row of db.prepare(`SELECT conversation_id, project_id, workspace_uris,
-      last_modified_time, last_user_input_time, ${title} FROM conversation_summaries`).iterate()) {
+      last_modified_time, last_user_input_time, ${title}, ${parentCol}, ${depthCol} FROM conversation_summaries`).iterate()) {
       if (!row.conversation_id) continue;
       let workspaceUri;
       try {
         const uris = JSON.parse(row.workspace_uris);
         if (Array.isArray(uris)) workspaceUri = uris.find(uri => typeof uri === 'string' && uri.trim());
       } catch { /* Use the conversation's workspace when available. */ }
+      const parentRawId = typeof row.parent_conversation_id === 'string' && row.parent_conversation_id.trim()
+        ? row.parent_conversation_id.trim() : null;
+      const nestingDepth = Number.isSafeInteger(row.nesting_depth) && row.nesting_depth > 0 ? row.nesting_depth : 0;
       catalog.set(reference(salt, 'ag-session/' + row.conversation_id), {
+        rawId: row.conversation_id,
+        parentRawId,
+        isSubagent: Boolean(parentRawId) || nestingDepth > 0,
         projectReference: row.project_id ? reference(salt, 'ag-native-project/' + row.project_id) : null,
         workspaceUri,
         updatedAt: catalogTime(row.last_modified_time) ?? catalogTime(row.last_user_input_time),
@@ -140,14 +151,21 @@ export function readConversationDb(dbPath, salt, includePreviews = false, home =
       if (tmeta?.cascade_id) cascadeId = tmeta.cascade_id;
     } catch { /* Optional table. */ }
 
+    const parentRawId = meta.parentConversationId && meta.parentConversationId !== cascadeId
+      ? meta.parentConversationId
+      : (meta.cascadeId && meta.cascadeId !== cascadeId && meta.nestingDepth > 0 ? meta.cascadeId : null);
+    const isSubagent = Boolean(parentRawId) || (meta.nestingDepth ?? 0) > 0;
+
     const sessionRef = reference(salt, 'ag-session/' + cascadeId);
     const projectKey = workspaceKey(meta.workspaceUri);
     const projectRef = projectKey ? reference(salt, 'ag-project/' + projectKey) : '';
     const projectName = meta.workspaceName || 'Proyecto local';
 
     const turns = new Map();
+    const turnRawIds = new Map();
     const requests = new Map();
     const unknownStepModels = new Map();
+    const subagentLinks = new Map();
     let malformed = 0;
     let firstTs = meta.startedAtMs ?? Infinity;
     let lastTs = meta.startedAtMs ?? -Infinity;
@@ -211,6 +229,7 @@ export function readConversationDb(dbPath, salt, includePreviews = false, home =
         const msgKey = reference(salt, `ag-msg/${cascadeId}/${row.idx}`);
         turn.messages.set(msgKey, { time: sentAt, preview });
         turns.set(turnKey, turn);
+        turnRawIds.set(turnKey, rawTurnId);
         lastUserTurnKey = turnKey;
         continue;
       }
@@ -260,6 +279,7 @@ export function readConversationDb(dbPath, salt, includePreviews = false, home =
         turn._rawEnums.add(rawEnum);
       }
       turns.set(turnKey, turn);
+      if (rawTurnId && !turnRawIds.has(turnKey)) turnRawIds.set(turnKey, rawTurnId);
 
       const reqId = reference(salt, `${cascadeId}/${parsed.usage.messageId || 'step-' + row.idx}`);
       if (!requests.has(reqId)) {
@@ -302,7 +322,38 @@ export function readConversationDb(dbPath, salt, includePreviews = false, home =
     for (const turn of turns.values()) delete turn._rawEnums;
     for (const req of requests.values()) delete req._rawEnum;
 
+    if (!isSubagent) {
+      try {
+        const invokeRows = db.prepare(
+          `SELECT metadata, step_payload FROM steps WHERE step_type = ${STEP_INVOKE_SUBAGENT} AND step_payload IS NOT NULL ORDER BY idx ASC`,
+        ).all();
+        for (const row of invokeRows) {
+          if (!row.metadata || !row.step_payload) continue;
+          const payloadBuf = Buffer.isBuffer(row.step_payload) ? row.step_payload : Buffer.from(row.step_payload);
+          if (payloadBuf.length < 36) continue;
+          const matches = payloadBuf.toString('latin1').match(UUID_RE);
+          if (!matches) continue;
+          const metaParsed = parseStepMetadata(row.metadata);
+          const parentTurnId = metaParsed?.turnId;
+          if (!parentTurnId) continue;
+          for (const uuid of matches) {
+            const lower = uuid.toLowerCase();
+            if (lower !== cascadeId.toLowerCase() && !subagentLinks.has(lower)) {
+              subagentLinks.set(lower, parentTurnId);
+            }
+          }
+        }
+      } catch { /* Optional step type */ }
+    }
+
     return {
+      rawId: cascadeId,
+      parentRawId,
+      isSubagent,
+      firstTs,
+      lastTs,
+      subagentLinks,
+      turnRawIds,
       session: {
         reference: sessionRef,
         startedAt: Number.isFinite(firstTs) ? new Date(firstTs).toISOString() : null,
@@ -374,6 +425,8 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
   const turns = new Map();
   const requests = new Map();
   const sessions = new Map();
+  const parsedEntries = [];
+  const parsedByRawId = new Map();
 
   for (const file of topFiles) {
     let parsed = null;
@@ -402,6 +455,51 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
     coverage.scannedFiles++;
     coverage.sameAccountFiles++;
     coverage.malformedLines += parsed.malformed;
+    parsedEntries.push({ file, parsed });
+    if (parsed.rawId) parsedByRawId.set(parsed.rawId.toLowerCase(), parsed);
+  }
+
+  // Build parent map across both DB metadata and conversation_summaries catalog
+  const parentByRawId = new Map();
+  const isSubagentRawId = new Set();
+  for (const entry of catalog.values()) {
+    if (!entry.rawId) continue;
+    const idLower = entry.rawId.toLowerCase();
+    if (entry.parentRawId) parentByRawId.set(idLower, entry.parentRawId.toLowerCase());
+    if (entry.isSubagent) isSubagentRawId.add(idLower);
+  }
+  for (const { parsed } of parsedEntries) {
+    if (!parsed.rawId) continue;
+    const idLower = parsed.rawId.toLowerCase();
+    if (parsed.parentRawId) parentByRawId.set(idLower, parsed.parentRawId.toLowerCase());
+    if (parsed.isSubagent) isSubagentRawId.add(idLower);
+  }
+
+  function resolveRootRawId(rawId) {
+    let cur = rawId.toLowerCase();
+    const visited = new Set([cur]);
+    while (parentByRawId.has(cur)) {
+      const next = parentByRawId.get(cur);
+      if (!next || visited.has(next)) break;
+      visited.add(next);
+      cur = next;
+    }
+    return cur;
+  }
+
+  const cloneTurn = (turn, overrides = null) => ({
+    ...turn,
+    messages: turn.messages ? new Map(turn.messages) : new Map(),
+    models: [...(turn.models ?? [])],
+    efforts: [...(turn.efforts ?? [])],
+    ...(overrides ?? {}),
+  });
+
+  // Pass 1: Add all top-level (non-subagent) conversations and index their turns
+  const parentUserTurns = new Map();
+  for (const { file, parsed } of parsedEntries) {
+    const idLower = parsed.rawId?.toLowerCase() ?? '';
+    if (isSubagentRawId.has(idLower)) continue;
 
     sessions.set(parsed.session.reference, {
       ...parsed.session,
@@ -411,15 +509,92 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
       projectName: parsed.project?.name,
     });
 
+    const userTurns = [];
     for (const [key, turn] of parsed.turns) {
-      turns.set(key, turn);
+      const cloned = cloneTurn(turn);
+      turns.set(key, cloned);
+      if (cloned.composer) {
+        const rawTurnId = parsed.turnRawIds?.get(key);
+        if (rawTurnId) {
+          userTurns.push({
+            key,
+            rawTurnId,
+            start: cloned.started ?? cloned.first,
+            end: cloned.ended ?? cloned.last,
+          });
+        }
+      }
     }
+    userTurns.sort((a, b) => a.start - b.start);
+    if (idLower) parentUserTurns.set(idLower, userTurns);
+
     for (const [key, req] of parsed.requests) {
       if (!requests.has(key)) requests.set(key, req);
     }
   }
 
-  for (const ref of catalog.keys()) {
+  // Pass 2: Fold every subagent DB into its root parent chat and exact parent turn
+  for (const { parsed } of parsedEntries) {
+    const idLower = parsed.rawId?.toLowerCase() ?? '';
+    if (!isSubagentRawId.has(idLower)) continue;
+
+    const rootLower = resolveRootRawId(idLower);
+    const parentParsed = parsedByRawId.get(rootLower);
+    const rootRawId = parentParsed?.rawId ?? rootLower;
+    const rootSessionRef = reference(salt, 'ag-session/' + rootRawId);
+
+    // Find exact parent turn_id via step_type=132 link (checking direct and root parent)
+    let parentTurnRawId = parentParsed?.subagentLinks?.get(idLower) ?? null;
+    if (!parentTurnRawId) {
+      let cur = idLower;
+      const seen = new Set([cur]);
+      while (!parentTurnRawId && parentByRawId.has(cur)) {
+        const pId = parentByRawId.get(cur);
+        if (!pId || seen.has(pId)) break;
+        seen.add(pId);
+        parentTurnRawId = parsedByRawId.get(pId)?.subagentLinks?.get(cur) ?? null;
+        cur = pId;
+      }
+    }
+
+    // Time-based fallback if parent step_type=132 link wasn't found
+    if (!parentTurnRawId && Number.isFinite(parsed.firstTs)) {
+      const candidates = parentUserTurns.get(rootLower) ?? [];
+      const enclosing = candidates.find(t => t.start - 5000 <= parsed.firstTs && t.end + 5000 >= parsed.firstTs)
+        ?? candidates.filter(t => t.start <= parsed.firstTs).at(-1);
+      if (enclosing) parentTurnRawId = enclosing.rawTurnId;
+    }
+
+    const familyKey = parentTurnRawId ? reference(salt, `ag-root/${rootRawId}/${parentTurnRawId}`) : null;
+    if (familyKey && parentTurnRawId) {
+      const parentTurnKey = reference(salt, `${rootRawId}/${parentTurnRawId}`);
+      const parentTurn = turns.get(parentTurnKey);
+      if (parentTurn) parentTurn.family = familyKey;
+    }
+
+    for (const [key, turn] of parsed.turns) {
+      turns.set(key, cloneTurn(turn, {
+        session: rootSessionRef,
+        child: true,
+        composer: false,
+        messages: new Map(),
+        ended: turn.ended ?? (Number.isFinite(turn.last) ? turn.last : null),
+        ...(familyKey ? { family: familyKey } : {}),
+      }));
+    }
+    for (const [key, req] of parsed.requests) {
+      if (!requests.has(key)) requests.set(key, req);
+    }
+
+    // Keep parent session updatedAt fresh if subagent ran later
+    const parentSess = sessions.get(rootSessionRef);
+    if (parentSess && parsed.session.updatedAt && (!parentSess.updatedAt || parsed.session.updatedAt > parentSess.updatedAt)) {
+      parentSess.updatedAt = parsed.session.updatedAt;
+    }
+  }
+
+  for (const [ref, entry] of catalog) {
+    if (entry.isSubagent) continue;
     if (!sessions.has(ref)) sessions.set(ref, { reference: ref, partial: true });
   }
   const projectsMap = new Map();

@@ -14,6 +14,7 @@ import {
 } from './antigravity-proto.mjs';
 import { readConversationDb, recentAntigravityHistory } from './antigravity-db.mjs';
 import { parseAgyUsageJson } from './antigravity-cli.mjs';
+import { analyticsSummary, interactionSummary } from './report.mjs';
 
 function encodeVarint(num) {
   let n = BigInt(num);
@@ -212,5 +213,126 @@ test('parsea salida JSON oficial de agy /usage con 4 ventanas (Gemini y Claude/G
   assert.equal(gw.usedPercent, 5.5);
   assert.equal(c5.usedPercent, 0);
   assert.equal(cw.usedPercent, 59);
+});
+
+test('integra subagentes de Antigravity en el chat y turno padre sin duplicar chats ni marcar cuota compartida', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ag-subagent-test-'));
+  const convDir = join(root, 'conversations');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(convDir, { recursive: true });
+
+  const parentId = '11111111-2222-3333-4444-555555555555';
+  const childId = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+  const parentTurnId = 'aaaa1111-2222-3333-4444-555555555555';
+  const childTurnId = 'bbbb1111-2222-3333-4444-555555555555';
+
+  const makeSchema = db => db.exec(`
+    CREATE TABLE trajectory_meta (trajectory_id TEXT PRIMARY KEY, cascade_id TEXT, trajectory_type INTEGER, source INTEGER);
+    CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);
+    CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB, step_payload BLOB);
+  `);
+
+  // Parent DB
+  const pdb = new DatabaseSync(join(convDir, `${parentId}.db`));
+  makeSchema(pdb);
+  pdb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, 1, 1)').run('traj-p', parentId);
+  pdb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run('main', Buffer.concat([
+    fBytes(1, fBytes(1, 'file:///c:/dev/demo-workspace')),
+    fTimestamp(2, 1795000000),
+    fBytes(6, parentId),
+  ]));
+  pdb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(
+    0, 14, 3,
+    Buffer.concat([fTimestamp(1, 1795000010), fBytes(12, parentTurnId)]),
+    fBytes(19, fBytes(2, 'Revisar arquitectura')),
+  );
+  const pUsage = Buffer.concat([fVarint(1, 1533), fVarint(2, 2000), fVarint(3, 500), fVarint(5, 10000), fBytes(7, 'p-bot-1')]);
+  pdb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(
+    1, 15, 3,
+    Buffer.concat([fTimestamp(1, 1795000011), fTimestamp(8, 1795000013), fBytes(9, pUsage), fVarint(11, 1533), fBytes(12, parentTurnId)]),
+    null,
+  );
+  // step_type 132 linking childId to parentTurnId
+  pdb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(
+    2, 132, 3,
+    Buffer.concat([fTimestamp(1, 1795000013), fBytes(12, parentTurnId)]),
+    Buffer.from(`invoke_subagent:${childId}`, 'utf8'),
+  );
+  const pUsage2 = Buffer.concat([fVarint(1, 1533), fVarint(2, 1000), fVarint(3, 300), fVarint(5, 12000), fBytes(7, 'p-bot-2')]);
+  pdb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(
+    3, 15, 3,
+    Buffer.concat([fTimestamp(1, 1795000022), fTimestamp(8, 1795000025), fBytes(9, pUsage2), fVarint(11, 1533), fBytes(12, parentTurnId)]),
+    null,
+  );
+  pdb.close();
+
+  // Child (subagent) DB
+  const cdb = new DatabaseSync(join(convDir, `${childId}.db`));
+  makeSchema(cdb);
+  cdb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, 4, 1)').run('traj-c', childId);
+  cdb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run('main', Buffer.concat([
+    fBytes(1, fBytes(1, 'file:///c:/dev/demo-workspace')),
+    fTimestamp(2, 1795000014),
+    fBytes(5, parentId),
+    fBytes(6, parentId),
+    fVarint(17, 1),
+  ]));
+  const cUsage = Buffer.concat([fVarint(1, 1533), fVarint(2, 1500), fVarint(3, 400), fVarint(5, 8000), fBytes(7, 'c-bot-1')]);
+  cdb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(
+    1, 15, 3,
+    Buffer.concat([fTimestamp(1, 1795000015), fTimestamp(8, 1795000020), fBytes(9, cUsage), fVarint(11, 1533), fBytes(12, childTurnId)]),
+    null,
+  );
+  cdb.close();
+
+  // Catalog DB with parent_conversation_id & nesting_depth
+  const sumDb = new DatabaseSync(join(root, 'conversation_summaries.db'));
+  sumDb.exec(`CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY,
+    project_id TEXT, workspace_uris TEXT, last_modified_time TEXT, last_user_input_time TEXT,
+    title TEXT, parent_conversation_id TEXT, nesting_depth INTEGER)`);
+  sumDb.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, NULL, ?, ?, ?)').run(
+    parentId, 'proj-1', '["file:///c:/dev/demo-workspace"]', '2026-11-24 10:00:00+00:00', 'Chat principal', null, 0,
+  );
+  sumDb.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, NULL, ?, ?, ?)').run(
+    childId, 'proj-1', '["file:///c:/dev/demo-workspace"]', '2026-11-24 10:00:05+00:00', '', parentId, 1,
+  );
+  sumDb.close();
+
+  try {
+    const salt = randomBytes(32);
+    const workspace = { selected: null, dbCache: new Map() };
+    const hist = await recentAntigravityHistory(root, salt, true, workspace);
+
+    // Only the 1 parent chat appears in sessionCatalog
+    assert.equal(hist.sessionCatalog.length, 1);
+    assert.equal(hist.sessionCatalog[0].nativeTitle, 'Chat principal');
+
+    // Quota snapshots bracketing [1795000005, 1795000030] should stay 'observed' (0 competing turns)
+    const buckets = [{ pool: 'gemini', minutes: 300 }, { pool: 'gemini', minutes: 10080 }];
+    const live = [
+      { pool: 'gemini', minutes: 300, usedPercent: 10, resetsAt: new Date(1795018000000).toISOString(), time: 1795000005000, scope: 'same', source: 'agy-cli' },
+      { pool: 'gemini', minutes: 300, usedPercent: 15, resetsAt: new Date(1795018000000).toISOString(), time: 1795000030000, scope: 'same', source: 'agy-cli' },
+    ];
+    const details = interactionSummary(hist, 0, 1795000060000, live, true, { buckets });
+    assert.equal(details.observedQuestions, 1);
+    assert.equal(details.observedOtherTurns, 0);
+    const [prompt] = details.turns;
+    assert.equal(prompt.observedRequests, 3);
+    assert.equal(prompt.childRequests, 1);
+    assert.deepEqual(prompt.requests.map(r => r.kind), ['first', 'related', 'followup']);
+    const q5 = prompt.quota.find(q => q.pool === 'gemini' && q.minutes === 300);
+    assert.equal(q5.status, 'observed');
+    assert.equal(q5.otherTurns, 0);
+    assert.equal(q5.deltaPp, 5);
+
+    // Analytics also rolls up subagent steps into the 1 prompt and measures observed drop
+    const an = analyticsSummary(hist, 1795000060000, 'antigravity', live, { buckets });
+    assert.equal(an.periods['24h'].observedTurns, 1);
+    assert.equal(an.periods['24h'].observedRequests, 3);
+    assert.equal(an.periods['24h'].quotaAverages.measured5hTurns, 1);
+    assert.equal(an.periods['24h'].quotaAverages.avg5hPerTurnPp, 5);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 

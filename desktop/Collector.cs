@@ -179,7 +179,7 @@ internal sealed class Collector
         if (!Directory.Exists(Recordings)) return result;
         var pattern = provider == ProviderKind.Codex ? "codex-*.jsonl" : "antigravity-*.jsonl";
         var files = new DirectoryInfo(Recordings).EnumerateFiles(pattern)
-            .OrderByDescending(file => file.LastWriteTimeUtc).Take(8);
+            .OrderByDescending(file => file.LastWriteTimeUtc).Take(64);
         foreach (var file in files)
         {
             try
@@ -195,7 +195,7 @@ internal sealed class Collector
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
-        return result.OrderBy(sample => sample.At).TakeLast(120).ToList();
+        return result.OrderBy(sample => sample.At).TakeLast(500).ToList();
     });
 }
 

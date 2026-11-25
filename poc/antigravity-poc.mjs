@@ -47,7 +47,7 @@ async function readSavedRecordings(folder) {
   files.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
   const items = [];
-  for (const file of files.slice(0, 16)) {
+  for (const file of files.slice(0, 256)) {
     try {
       const text = await readFile(file.path, 'utf8');
       for (const line of text.split(/\r?\n/)) {
@@ -63,7 +63,7 @@ async function readSavedRecordings(folder) {
     } catch { /* Ignore unreadable file */ }
   }
   items.sort((a, b) => a.time - b.time);
-  return items.slice(-5000);
+  return items.slice(-50_000);
 }
 
 function buildManualSample(observedAt, windows) {
@@ -246,7 +246,7 @@ async function main() {
         if (agyResult && agyResult.windows.length > 0) {
           quotaSample = agyResult;
           liveRecords.push({ time: Date.parse(agyResult.observedAt), quota: agyResult, recorded: Boolean(watchOutput) });
-          if (liveRecords.length > 5000) liveRecords.shift();
+          if (liveRecords.length > 20_000) liveRecords.shift();
         } else {
           const fallbackWindows = latestWindowsFrom([...recordedHistory, ...liveRecords]);
           quotaSample = {

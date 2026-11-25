@@ -32,10 +32,17 @@ public partial class MainWindow : Window
     private bool closing;
     private bool closeReady;
     private bool updatingSessionPicker;
+    private bool userPickedMetric;
     private string interactionSortColumn = nameof(InteractionRow.At);
     private ListSortDirection interactionSortDirection = ListSortDirection.Descending;
 
     private ProviderState Current => providers[activeProvider];
+
+    private static bool IsCodexWeeklyOnly(ProviderState state) =>
+        state.Kind == ProviderKind.Codex
+        && state.LatestSample is { } sample
+        && !sample.Left(300).HasValue
+        && sample.Left(10080).HasValue;
 
     public MainWindow()
     {
@@ -124,6 +131,7 @@ public partial class MainWindow : Window
     private void SelectProvider(ProviderKind kind, bool refreshView)
     {
         activeProvider = kind;
+        userPickedMetric = false;
         UpdateProviderChrome();
         UpdateProviderLabels();
         UpdateButtons();
@@ -175,6 +183,41 @@ public partial class MainWindow : Window
         OfficialSourceTitle.Text = isCodex ? "Cuota oficial · Codex App Server" : "Cuota oficial · Antigravity CLI (agy /usage)";
         LocalSourceTitle.Text = isCodex ? "Historial local · Rollouts" : "Historial local · SQLite (conversations)";
         ComparisonTitle.Text = isCodex ? "Reconciliación y auditoría" : "Privacidad y cobertura";
+        SyncCodexWindowMode(Current);
+    }
+
+    private void SyncCodexWindowMode(ProviderState state)
+    {
+        if (state.Kind != activeProvider || ShortQuotaCard is null || WindowPicker is null) return;
+        var weeklyOnly = IsCodexWeeklyOnly(state);
+        var isCodex = state.Kind == ProviderKind.Codex;
+
+        ShortQuotaCard.Visibility = weeklyOnly ? Visibility.Collapsed : Visibility.Visible;
+        QuotaStrip.Columns = weeklyOnly ? 1 : isCodex ? 2 : 4;
+        OverviewLegend1.Visibility = weeklyOnly ? Visibility.Collapsed : Visibility.Visible;
+        HistoryLegend1.Visibility = weeklyOnly ? Visibility.Collapsed : Visibility.Visible;
+        HistoryCol1.Visibility = weeklyOnly ? Visibility.Collapsed : Visibility.Visible;
+        WindowOpt1.Visibility = weeklyOnly ? Visibility.Collapsed : Visibility.Visible;
+
+        if (weeklyOnly)
+        {
+            if (WindowPicker.SelectedIndex == 0)
+            {
+                updatingSessionPicker = true;
+                try { WindowPicker.SelectedIndex = 1; }
+                finally { updatingSessionPicker = false; }
+            }
+            if (!userPickedMetric && activeComparisonMetric == "drop5h")
+            {
+                activeComparisonMetric = "dropWeek";
+                UpdateMetricButtons();
+            }
+        }
+        else if (!userPickedMetric && !isCodex && activeComparisonMetric == "dropWeek")
+        {
+            activeComparisonMetric = "drop5h";
+            UpdateMetricButtons();
+        }
     }
 
     private void ClearProviderView()
@@ -222,6 +265,7 @@ public partial class MainWindow : Window
     private void SelectComparisonMetric(object sender, RoutedEventArgs e)
     {
         var metric = (string)((Button)sender).Tag;
+        userPickedMetric = true;
         if (metric == activeComparisonMetric) return;
         activeComparisonMetric = metric;
         UpdateMetricButtons();
@@ -354,7 +398,10 @@ public partial class MainWindow : Window
         if (state.Kind == ProviderKind.Codex)
         {
             var left5h = sample.Left(300);
-            state.SubLabel = left5h.HasValue ? $"{Percent(left5h)} · 5 h disp." : "Conectado";
+            var leftWeek = sample.Left(10080);
+            state.SubLabel = left5h.HasValue ? $"{Percent(left5h)} · 5 h disp."
+                : leftWeek.HasValue ? $"{Percent(leftWeek)} · sem. disp."
+                : "Conectado";
             CodexSubLabel.Text = state.SubLabel;
         }
         else
@@ -429,6 +476,7 @@ public partial class MainWindow : Window
 
     private void Display(ProviderState state, QuotaSample sample)
     {
+        SyncCodexWindowMode(state);
         var isCodex = state.Kind == ProviderKind.Codex;
         var plan = sample.Quota.Text("plan");
         var label = isCodex
@@ -575,10 +623,11 @@ public partial class MainWindow : Window
         var usdPer1Pct5h = qa.Number("usdPer1Pct5h") ?? p30Qa.Number("usdPer1Pct5h");
         var calCount5h = qa.Number("usdPer1Pct5h").HasValue ? (qa.Count("calibrated5hTurns") ?? 0) : (p30Qa.Count("calibrated5hTurns") ?? 0);
         var usdPer1PctW = qa.Number("usdPer1PctWeek") ?? p30Qa.Number("usdPer1PctWeek");
+        var calCountW = qa.Number("usdPer1PctWeek").HasValue ? (qa.Count("calibratedWeekTurns") ?? 0) : (p30Qa.Count("calibratedWeekTurns") ?? 0);
         var avgDay = qa.Number("avgUsdPerActiveDay");
         var activeDays = qa.Count("activeDays") ?? 0;
 
-        if (usdPer1Pct5h.HasValue)
+        if (usdPer1Pct5h.HasValue && !IsCodexWeeklyOnly(Current))
         {
             QuotaRateTitle.Text = "1 % de cuota 5 h (tu plan)";
             QuotaRateValue.Text = Money(usdPer1Pct5h);
@@ -587,6 +636,16 @@ public partial class MainWindow : Window
             QuotaRateCard.ToolTip = $"Calibración empírica de tu plan actual (sin asumir multiplicadores):\n"
                 + $"• 1 % de cuota 5 h ≈ {Money(usdPer1Pct5h)} equiv. API ({Number(calCount5h)} prompts aislados)"
                 + (usdPer1PctW.HasValue ? $"\n• 1 % de cuota semanal ≈ {Money(usdPer1PctW)} equiv. API" : "")
+                + (avgDay.HasValue ? $"\n• Promedio diario ({activeDays} días activos): {Money(avgDay)}" : "");
+        }
+        else if (usdPer1PctW.HasValue)
+        {
+            QuotaRateTitle.Text = "1 % de cuota semanal (tu plan)";
+            QuotaRateValue.Text = Money(usdPer1PctW);
+            QuotaRateSub.Text = $"Medido en {Number(calCountW)} prompts aislados"
+                + (avgDay.HasValue ? $" · {Money(avgDay)}/día" : "");
+            QuotaRateCard.ToolTip = $"Calibración empírica de tu plan actual (sin asumir multiplicadores):\n"
+                + $"• 1 % de cuota semanal ≈ {Money(usdPer1PctW)} equiv. API ({Number(calCountW)} prompts aislados)"
                 + (avgDay.HasValue ? $"\n• Promedio diario ({activeDays} días activos): {Money(avgDay)}" : "");
         }
         else
@@ -691,7 +750,8 @@ public partial class MainWindow : Window
         SessionCompChartPanel.Visibility = compRows.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
         SessionCompGrid.ItemsSource = FormatComparisonRows(compRows);
         if (SessionCompChart.IsVisible)
-            ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, compRows, "drop5h");
+            ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, compRows,
+                IsCodexWeeklyOnly(Current) ? "dropWeek" : "drop5h");
     }
 
     private static List<object> FormatComparisonRows(IEnumerable<JsonElement> rows) =>
@@ -831,7 +891,7 @@ public partial class MainWindow : Window
 
     private void FilterInteractions(object sender, SelectionChangedEventArgs e)
     {
-        if (InteractionsGrid is not null && Current.PendingSession is null) RenderInteractions();
+        if (!updatingSessionPicker && InteractionsGrid is not null && Current.PendingSession is null) RenderInteractions();
     }
 
     private void SearchInteractions(object sender, TextChangedEventArgs e)
@@ -867,6 +927,7 @@ public partial class MainWindow : Window
             return;
         }
         SetChatStatus(null);
+        SyncCodexWindowMode(state);
         RenderSessionQuota(state.CurrentInteractions.Get("sessionQuotaHistory"));
         var questions = InteractionFilter.SelectedIndex != 1;
         var (pool, minutes) = SelectedQuotaBucket();
@@ -889,6 +950,7 @@ public partial class MainWindow : Window
         var offset = selected is null || !preserveScroll ? 0 : scroller?.VerticalOffset ?? 0;
         InteractionsGrid.ItemsSource = rows;
         InteractionsGrid.SelectedItem = rows.Find(row => row.Key == selected) ?? rows.FirstOrDefault();
+        UpdateSelectedInteractionDetail();
         ShowInteractionSort();
         if (offset > 0 && scroller is not null)
             _ = Dispatcher.InvokeAsync(() =>
@@ -1016,7 +1078,6 @@ public partial class MainWindow : Window
 
         var apiCost = turn.Get("apiCost");
         var costUsd = apiCost.Number("usd");
-        var costText = combined ? "—" : Money(costUsd);
         string? costHint = null;
         if (costUsd.HasValue)
         {
@@ -1030,15 +1091,24 @@ public partial class MainWindow : Window
 
         for (var index = 0; index < Math.Max(1, messages.Length); index++)
         {
+            var isFollowupInSameTurn = combined && index > 0;
             var message = messages.Length > 0 ? messages[index] : default;
             var time = message.Date("sentAt") ?? turn.Date("sentAt") ?? turn.Date("lastRequestAt");
-            var label = questions ? message.Text("preview") ?? turn.Text("promptPreview") ?? "Prompt sin vista previa"
+            var baseLabel = questions ? message.Text("preview") ?? turn.Text("promptPreview") ?? "Prompt sin vista previa"
                 : "Actividad automática del agente";
+            var label = isFollowupInSameTurn ? $"↳ {baseLabel}" : baseLabel;
             var beforeConfirmed = impact.Get("hasStart").ValueKind == JsonValueKind.True;
-            var beforeValue = !combined ? AvailableValue(before) : null;
-            var afterValue = !combined ? AvailableValue(after) : null;
-            var dropValue = combined ? null : impact.Number("deltaPp");
-            var measurementHint = combined ? "Varios envíos comparten la misma respuesta. La baja conjunta está en el detalle."
+            var beforeValue = !isFollowupInSameTurn ? AvailableValue(before) : null;
+            var afterValue = !isFollowupInSameTurn ? AvailableValue(after) : null;
+            var dropValue = isFollowupInSameTurn ? null : impact.Number("deltaPp");
+            var isRunning = turn.Text("status") == "end-unobserved";
+            var measurementLabel = isFollowupInSameTurn
+                ? "Mismo turno"
+                : combined
+                    ? (isRunning ? $"En curso ({messages.Length} env.)" : $"{measurement} ({messages.Length} env.)")
+                    : (isRunning && measurement == "Sin lectura" ? "En curso" : measurement);
+            var measurementHint = isFollowupInSameTurn
+                ? "Mensaje enviado durante el turno activo anterior. El consumo total figura en el primer envío y en el detalle."
                 : measurement switch
                 {
                     "Compartida" => "Hubo otra actividad en el intervalo.",
@@ -1046,21 +1116,26 @@ public partial class MainWindow : Window
                         ? "Lectura parcial con otra actividad en el intervalo."
                         : "La baja corresponde al tramo con lecturas disponibles.",
                     "Sin comparar" => "Las lecturas corresponden a ventanas distintas o incompatibles.",
-                    "Sin lectura" => "Faltan dos lecturas comparables para calcular la baja.",
+                    "Sin lectura" => isRunning ? "Turno activo en curso; esperando cierre y lecturas." : "Faltan dos lecturas comparables para calcular la baja.",
                     _ => null,
                 };
-            if (!combined && impact.Get("fluctuated").ValueKind == JsonValueKind.True)
+            if (combined && !isFollowupInSameTurn)
+                measurementHint = $"Turno con {messages.Length} mensajes enviados mientras estaba activo. Los valores muestran el total del turno."
+                    + (measurementHint is null ? "" : "\n" + measurementHint);
+            if (!isFollowupInSameTurn && impact.Get("fluctuated").ValueKind == JsonValueKind.True)
                 measurementHint = (measurementHint is null ? "" : measurementHint + " ")
                     + "La cuota fluctuó entre lecturas. Se muestra la baja neta.";
             yield return new InteractionRow(
-                $"{reference}:{index}", time, time is { } stamp ? LocalTime(stamp) : "—", label, model, effort, calls,
-                combined ? "—" : tokensShort, totalTokens,
-                costText, combined ? null : costUsd, combined ? "Costo conjunto en el detalle." : costHint,
+                $"{reference}:{index}", time, time is { } stamp ? LocalTime(stamp) : "—", label, model, effort,
+                isFollowupInSameTurn ? null : calls,
+                isFollowupInSameTurn ? "—" : tokensShort, isFollowupInSameTurn ? 0 : totalTokens,
+                isFollowupInSameTurn ? "—" : Money(costUsd), isFollowupInSameTurn ? null : costUsd,
+                isFollowupInSameTurn ? "Incluido en el total del turno." : costHint,
                 Percent(beforeValue), Percent(afterValue), Percent(dropValue),
-                combined ? "—" : Number(calls),
-                combined ? "En conjunto" : measurement,
-                !combined ? SnapshotHint(before, beforeConfirmed ? "Antes de enviar el prompt" : "Durante la ejecución") : null,
-                !combined ? SnapshotHint(after, impact.Get("hasEnd").ValueKind == JsonValueKind.True ? "Al terminar la respuesta" : "Última lectura") : null,
+                isFollowupInSameTurn ? "—" : Number(calls),
+                measurementLabel,
+                !isFollowupInSameTurn ? SnapshotHint(before, beforeConfirmed ? "Antes de enviar el prompt" : "Durante la ejecución") : null,
+                !isFollowupInSameTurn ? SnapshotHint(after, impact.Get("hasEnd").ValueKind == JsonValueKind.True ? "Al terminar la respuesta" : "Última lectura") : null,
                 measurementHint,
                 beforeValue, afterValue, dropValue, effortRank, turn);
         }
@@ -1133,7 +1208,10 @@ public partial class MainWindow : Window
         point.Date("at") is { } time
             ? $"{interval} · {time.ToLocalTime().ToString("dd/MM HH:mm:ss", Locale)}" : null;
 
-    private void SelectInteraction(object sender, SelectionChangedEventArgs e)
+    private void SelectInteraction(object sender, SelectionChangedEventArgs e) =>
+        UpdateSelectedInteractionDetail();
+
+    private void UpdateSelectedInteractionDetail()
     {
         if (InteractionDetail is null) return;
         if (InteractionsGrid.SelectedItem is not InteractionRow row)
@@ -1150,25 +1228,58 @@ public partial class MainWindow : Window
         var question = turn.Text("kind") == "question";
         var sent = turn.Date("sentAt");
         var finished = turn.Date("endedAt");
-        var steps = row.Count ?? 0;
+        var steps = turn.Count("observedRequests") ?? 0;
+        var turnTotalTokens = turn.Count("tokensObserved") ?? 0;
+        var messages = turn.Rows("messages").ToArray();
 
         InteractionDetail.Visibility = Visibility.Visible;
-        InteractionTitle.Text = question ? row.Label : $"Ejecución automática · {row.Time}";
+        InteractionTitle.Text = question ? (turn.Text("promptPreview") ?? row.Label.TrimStart('↳', ' ')) : $"Ejecución automática · {row.Time}";
 
         InteractionChips.Children.Clear();
         AddChip("Modelo", row.Model);
         if (row.Effort != "—") AddChip("Esfuerzo", row.Effort);
         AddChip("Duración", elapsed);
-        if (sent is { } sTime) AddChip("Horario", ClockTime(sTime) + (finished is { } eTime ? $" → {ClockTime(eTime)}" : ""));
+        if (sent is { } sTime) AddChip("Horario", ClockTime(sTime) + (finished is { } eTime ? $" → {ClockTime(eTime)}" : " → en curso"));
         var apiCost = turn.Get("apiCost");
         var maxCtxTok = apiCost.Count("maxContextTokens") ?? 0;
         if (maxCtxTok > 0) AddChip("Contexto máx.", ShortNumber(maxCtxTok));
         AddChip("Pasos del modelo", Number(steps));
+        if (messages.Length > 1) AddChip("Mensajes en el turno", Number(messages.Length));
+
+        TurnMessagesPanel.Children.Clear();
+        if (messages.Length > 1)
+        {
+            TurnMessagesPanel.Children.Add(new TextBlock
+            {
+                Text = $"Mensajes enviados en este turno ({messages.Length})",
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = (Brush)Application.Current.Resources["TextMuted"],
+                Margin = new Thickness(0, 0, 0, 4),
+            });
+            for (var i = 0; i < messages.Length; i++)
+            {
+                var msgTime = messages[i].Date("sentAt") is { } mt ? ClockTime(mt) : "—";
+                var msgText = messages[i].Text("preview") ?? "Sin vista previa";
+                TurnMessagesPanel.Children.Add(new TextBlock
+                {
+                    Text = $"{i + 1}. [{msgTime}]  {msgText}",
+                    FontSize = 11.5,
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 1, 0, 2),
+                });
+            }
+            TurnMessagesBox.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            TurnMessagesBox.Visibility = Visibility.Collapsed;
+        }
 
         var counts = turn.Get("observedCounts");
         var counted = turn.Count("tokenSamples") ?? 0;
         InteractionTokens.Text = counted == 0 ? "Sin total de tokens" :
-            $"{ShortNumber(row.TotalTokens)} tokens" + (counted < steps ? " · parcial" : "");
+            $"{ShortNumber(turnTotalTokens)} tokens" + (counted < steps ? " · parcial" : "");
         InteractionTokens.ToolTip = $"{Number(counted)} de {Number(steps)} pasos con total"
             + $"\nEntrada {Number(counts.Count("input_tokens"))} · Caché {Number(counts.Count("cached_input_tokens"))}"
             + $"\nSalida {Number(counts.Count("output_tokens"))} · Razonamiento {Number(counts.Count("reasoning_output_tokens"))}";
@@ -1217,6 +1328,11 @@ public partial class MainWindow : Window
         var poolTitle = activePool == "claude_gpt" ? "Claude / GPT" : activeProvider == ProviderKind.Antigravity ? "Gemini" : null;
         ShortImpactTitle.Text = poolTitle is null ? "Ventana de 5 horas" : $"{poolTitle} · 5 horas";
         WeekImpactTitle.Text = poolTitle is null ? "Ventana semanal" : $"{poolTitle} · Semanal";
+
+        var hideShortImpact = IsCodexWeeklyOnly(Current);
+        ShortImpactCard.Visibility = hideShortImpact ? Visibility.Collapsed : Visibility.Visible;
+        ShortImpactCol.Width = hideShortImpact ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
+        ImpactSpacerCol.Width = hideShortImpact ? new GridLength(0) : new GridLength(12);
 
         SetImpact(Impact(turn, 300, activePool), turn.Text("status") == "end-unobserved", ShortImpact, ShortReadings, ShortExplanation);
         SetImpact(Impact(turn, 10080, activePool), turn.Text("status") == "end-unobserved", WeekImpact, WeekReadings, WeekExplanation);
@@ -1348,7 +1464,7 @@ public partial class MainWindow : Window
     {
         if (state.Kind == ProviderKind.Antigravity && !sample.Quota.Rows("windows").Any()) return;
         state.Samples.Add(sample with { Root = JsonSerializer.SerializeToElement(new { quota = sample.Quota }) });
-        if (state.Samples.Count > 120) state.Samples.RemoveRange(0, state.Samples.Count - 120);
+        if (state.Samples.Count > 500) state.Samples.RemoveRange(0, state.Samples.Count - 500);
         state.HistoryDirty = true;
         if (state.Kind == activeProvider)
         {
@@ -1364,21 +1480,23 @@ public partial class MainWindow : Window
         if (HistoryPanel.Visibility != Visibility.Visible || !state.HistoryDirty) return;
         state.HistoryDirty = false;
         var isCodex = state.Kind == ProviderKind.Codex;
+        var weeklyOnly = IsCodexWeeklyOnly(state);
         var ordered = state.Samples.OrderBy(s => s.At).ToList();
         var rows = new List<object>(ordered.Count);
-        double? prevShort = null;
+        double? prevTracked = null;
 
         foreach (var sample in ordered)
         {
             var shortVal = isCodex ? sample.Left(300) : sample.Left(300, "gemini");
             var weekVal = isCodex ? sample.Left(10080) : sample.Left(10080, "gemini");
+            var tracked = weeklyOnly ? weekVal : (shortVal ?? weekVal);
             string deltaStr = "—";
-            if (shortVal.HasValue && prevShort.HasValue)
+            if (tracked.HasValue && prevTracked.HasValue)
             {
-                var diff = shortVal.Value - prevShort.Value;
+                var diff = tracked.Value - prevTracked.Value;
                 deltaStr = Math.Abs(diff) < 0.005 ? "0 %" : diff.ToString("+0.##;-0.##;0", Locale) + " %";
             }
-            prevShort = shortVal;
+            prevTracked = tracked;
             rows.Add(new
             {
                 Time = LocalTime(sample.At),
@@ -1468,7 +1586,8 @@ public partial class MainWindow : Window
         if (SessionCompChart.IsVisible)
         {
             var comp = Current.CurrentInteractions.Rows("sessionModelComparison");
-            ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, comp, "drop5h");
+            ChartRenderer.DrawModelComparisonChart(SessionCompChart, SessionCompEmpty, comp,
+                IsCodexWeeklyOnly(Current) ? "dropWeek" : "drop5h");
         }
         DrawVisibleCharts();
     }

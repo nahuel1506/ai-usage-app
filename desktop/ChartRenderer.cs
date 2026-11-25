@@ -668,8 +668,9 @@ internal static class ChartRenderer
         Label(Formatters.LocalTime(rows[0].At), left, height - 16);
         if (span > 0 && width > 300) Label(Formatters.LocalTime(rows[^1].At), right - 92, height - 16);
 
-        Series(Val2, 10080, secondaryBrush, withFill: false);
-        Series(Val1, 300, primaryBrush, withFill: true);
+        var hasVal1 = rows.Any(s => Val1(s).HasValue);
+        Series(Val2, 10080, secondaryBrush, withFill: !hasVal1);
+        if (hasVal1) Series(Val1, 300, primaryBrush, withFill: true);
 
         void Label(string text, double x, double y)
         {

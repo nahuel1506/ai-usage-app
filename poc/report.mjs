@@ -304,7 +304,7 @@ const CONTEXT_BUCKET_DEFS = [
 
 const EFFORT_SORT_ORDER = { none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6, ultra: 7, unspecified: 99 };
 
-function buildPeriodAnalytics(sameRequests, history, since, until, provider, bucketMode, projectNames, sessionProjects, sessionTitles, turnQuotaMap) {
+function buildPeriodAnalytics(sameRequests, history, since, until, provider, bucketMode, projectNames, sessionProjects, sessionTitles, turnQuotaMap, resolveTurnRoot = k => k) {
   const filtered = sameRequests.filter(req => req.time > since && req.time <= until);
   const turnIds = new Set();
   const sessionIds = new Set();
@@ -338,9 +338,11 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
   }
 
   for (const req of filtered) {
-    turnIds.add(req.turn);
+    const rootTurnKey = resolveTurnRoot(req.turn);
+    turnIds.add(rootTurnKey);
     const turn = history.turns.get(req.turn);
-    const sessionRef = turn?.session || null;
+    const rootTurn = history.turns.get(rootTurnKey) ?? turn;
+    const sessionRef = rootTurn?.session || turn?.session || null;
     if (sessionRef) sessionIds.add(sessionRef);
     const model = resolveReqModel(req, turn);
     const effort = resolveReqEffort(req, turn);
@@ -356,18 +358,20 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     const projRef = sessionRef ? sessionProjects.get(sessionRef) : null;
     const projName = (projRef && projectNames.get(projRef)) || 'Sin proyecto';
 
-    // Per-turn aggregation (for Top Prompts, Context Buckets, Effort Comparison)
-    let tAgg = turnAggs.get(req.turn);
+    // Per-turn aggregation (grouped by root prompt so subagent work rolls up into its parent prompt)
+    let tAgg = turnAggs.get(rootTurnKey);
     if (!tAgg) {
-      const firstMsg = [...(turn?.messages?.values() ?? [])].sort((a, b) => a.time - b.time)[0];
+      const firstMsg = [...(rootTurn?.messages?.values() ?? [])].sort((a, b) => a.time - b.time)[0];
+      const rootModel = rootTurn?.models?.length === 1 ? rootTurn.models[0] : model;
+      const rootEffort = rootTurn?.efforts?.length === 1 ? rootTurn.efforts[0] : effort;
       tAgg = {
-        reference: req.turn,
+        reference: rootTurnKey,
         session: sessionRef,
-        time: firstMsg?.time ?? turn?.started ?? req.time,
+        time: firstMsg?.time ?? rootTurn?.started ?? req.time,
         preview: firstMsg?.preview || null,
         project: projName,
-        model,
-        effort,
+        model: rootModel,
+        effort: rootEffort,
         steps: 0,
         usd: 0,
         pricedSteps: 0,
@@ -375,7 +379,7 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
         drop5hPp: null,
         dropWeekPp: null,
       };
-      turnAggs.set(req.turn, tAgg);
+      turnAggs.set(rootTurnKey, tAgg);
     }
     tAgg.steps++;
     if (priced.available) {
@@ -400,19 +404,19 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
         };
         chatAggs.set(sessionRef, cAgg);
       }
-      cAgg.turns.add(req.turn);
+      cAgg.turns.add(rootTurnKey);
       cAgg.steps++;
       cAgg.usd += usd;
       if (ctxTokens > cAgg.maxContextTokens) cAgg.maxContextTokens = ctxTokens;
     }
 
-    // Track observed quota drops per turn & per session
-    const q = turnQuotaMap?.get(req.turn);
+    // Track observed quota drops per root turn & per session
+    const q = turnQuotaMap?.get(rootTurnKey);
     if (q) {
-      if (!turnDrops5h.has(req.turn)) {
-        const d5 = pickQuotaDelta(q, 300, provider, model);
+      if (!turnDrops5h.has(rootTurnKey)) {
+        const d5 = pickQuotaDelta(q, 300, provider, tAgg.model);
         if (d5 !== null) {
-          turnDrops5h.set(req.turn, d5);
+          turnDrops5h.set(rootTurnKey, d5);
           tAgg.drop5hPp = d5;
           if (sessionRef) {
             sessionDrops5h.set(sessionRef, (sessionDrops5h.get(sessionRef) ?? 0) + d5);
@@ -420,10 +424,10 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
           }
         }
       }
-      if (!turnDropsWeek.has(req.turn)) {
-        const dw = pickQuotaDelta(q, 10080, provider, model);
+      if (!turnDropsWeek.has(rootTurnKey)) {
+        const dw = pickQuotaDelta(q, 10080, provider, tAgg.model);
         if (dw !== null) {
-          turnDropsWeek.set(req.turn, dw);
+          turnDropsWeek.set(rootTurnKey, dw);
           tAgg.dropWeekPp = dw;
           if (sessionRef) sessionDropsWeek.set(sessionRef, (sessionDropsWeek.get(sessionRef) ?? 0) + dw);
         }
@@ -653,31 +657,63 @@ export function analyticsSummary(history, until, provider = 'codex', live = [], 
     if (s?.reference && (s.nativeTitle || s.title)) sessionTitles.set(s.reference, s.nativeTitle || s.title);
   }
 
-  // Compute quota impact per active turn in the 30-day window so averages & model comparisons include real 5h/weekly drops
+  // Group child/subagent turns with their parent prompt root so quota attribution & averages stay intact
+  const familyRoots = new Map();
+  for (const turn of history.turns.values()) {
+    if (!isQuestion(turn) || !turn.family) continue;
+    familyRoots.set(turn.family, familyRoots.has(turn.family) ? null : turn.key);
+  }
+  const resolveTurnRoot = turnKey => {
+    const t = history.turns.get(turnKey);
+    return (t?.family && !t.familyConflict && t.scope === 'same' && familyRoots.get(t.family)) || turnKey;
+  };
+
+  // Compute quota impact per active prompt group in the 30-day window so averages & model comparisons include real 5h/weekly drops
   const turnQuotaMap = new Map();
   const series = quotaObservations(history, live, until, quotaOptions);
   const hasAnyQuota = [...series.values()].some(v => (Array.isArray(v) ? v.length : v.samples.length) >= 2);
   if (hasAnyQuota) {
     const cutoff30d = until - 30 * 86_400_000;
-    const seenTurns = new Set();
-    for (const req of sameRequests) {
-      if (req.time > cutoff30d) seenTurns.add(req.turn);
+    const groupedMembers = new Map();
+    for (const turn of history.turns.values()) {
+      if (turn.scope !== 'same') continue;
+      const rootKey = resolveTurnRoot(turn.key);
+      let set = groupedMembers.get(rootKey);
+      if (!set) { set = new Set([rootKey]); groupedMembers.set(rootKey, set); }
+      set.add(turn.key);
     }
-    for (const turnKey of seenTurns) {
-      const turn = history.turns.get(turnKey);
+    const seenRoots = new Set();
+    for (const req of sameRequests) {
+      if (req.time > cutoff30d) seenRoots.add(resolveTurnRoot(req.turn));
+    }
+    for (const rootKey of seenRoots) {
+      const turn = history.turns.get(rootKey);
       if (!turn) continue;
-      const start = turn.started ?? turn.first;
-      const end = turn.ended ?? turn.last;
+      const members = groupedMembers.get(rootKey) ?? new Set([rootKey]);
+      let firstReq = turn.first;
+      let lastReq = turn.last;
+      const ends = [];
+      for (const mk of members) {
+        const mt = history.turns.get(mk);
+        if (!mt) continue;
+        if (Number.isFinite(mt.first) && mt.first < firstReq) firstReq = mt.first;
+        if (Number.isFinite(mt.last) && mt.last > lastReq) lastReq = mt.last;
+        ends.push(mt.ended);
+      }
+      const start = turn.started ?? firstReq;
+      const knownEnd = ends.length > 0 && ends.every(e => Number.isFinite(e) && e <= until) ? Math.max(...ends) : null;
+      const end = knownEnd ?? lastReq;
       if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
       const q = interactionQuota(series, {
-        reference: turnKey,
-        members: new Set([turnKey]),
+        reference: rootKey,
+        members,
         startedAt: turn.started ? new Date(turn.started).toISOString() : null,
-        endedAt: turn.ended ? new Date(turn.ended).toISOString() : null,
-        firstRequest: turn.first,
-        lastRequest: turn.last,
+        endedAt: knownEnd !== null ? new Date(knownEnd).toISOString() : null,
+        firstRequest: firstReq,
+        lastRequest: lastReq,
       }, history);
-      turnQuotaMap.set(turnKey, q);
+      turnQuotaMap.set(rootKey, q);
+      for (const mk of members) turnQuotaMap.set(mk, q);
     }
   }
 
@@ -685,9 +721,9 @@ export function analyticsSummary(history, until, provider = 'codex', live = [], 
     catalog: pricingCatalogStatus(),
     promptQuota: hasAnyQuota ? promptQuotaProfile(series, history, until, provider) : [],
     periods: {
-      '24h': buildPeriodAnalytics(sameRequests, history, until - 24 * 3_600_000, until, provider, 'hour', projectNames, sessionProjects, sessionTitles, turnQuotaMap),
-      '7d': buildPeriodAnalytics(sameRequests, history, until - 7 * 86_400_000, until, provider, '7d', projectNames, sessionProjects, sessionTitles, turnQuotaMap),
-      '30d': buildPeriodAnalytics(sameRequests, history, until - 30 * 86_400_000, until, provider, '30d', projectNames, sessionProjects, sessionTitles, turnQuotaMap),
+      '24h': buildPeriodAnalytics(sameRequests, history, until - 24 * 3_600_000, until, provider, 'hour', projectNames, sessionProjects, sessionTitles, turnQuotaMap, resolveTurnRoot),
+      '7d': buildPeriodAnalytics(sameRequests, history, until - 7 * 86_400_000, until, provider, '7d', projectNames, sessionProjects, sessionTitles, turnQuotaMap, resolveTurnRoot),
+      '30d': buildPeriodAnalytics(sameRequests, history, until - 30 * 86_400_000, until, provider, '30d', projectNames, sessionProjects, sessionTitles, turnQuotaMap, resolveTurnRoot),
     },
   };
 }

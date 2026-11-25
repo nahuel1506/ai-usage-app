@@ -451,7 +451,7 @@
                 <StackPanel x:Name="OverviewPanel">
                     <!-- Row 1: Live Quotas + Estimated Autonomy -->
                     <UniformGrid x:Name="QuotaStrip" Rows="1" Margin="-6,0,-6,18">
-                        <Border Style="{StaticResource Card}" Padding="16" Margin="6,0">
+                        <Border x:Name="ShortQuotaCard" Style="{StaticResource Card}" Padding="16" Margin="6,0">
                             <StackPanel>
                                 <TextBlock x:Name="ShortQuotaTitle" Text="Ventana de 5 horas" Style="{StaticResource Meta}" FontSize="12"/>
                                 <TextBlock x:Name="ShortQuota" Text="—" FontSize="32" FontWeight="SemiBold" Margin="0,4,0,8" Foreground="{DynamicResource AccentPrimary}"/>
@@ -641,15 +641,20 @@
                                     <Expander Header="Detalle del prompt" Foreground="{DynamicResource TextPrimary}">
                                         <StackPanel Margin="0,12,0,0">
                                             <TextBlock x:Name="InteractionTitle" FontWeight="SemiBold" FontSize="16" TextWrapping="Wrap"/>
-                                            <WrapPanel x:Name="InteractionChips" Margin="0,8,0,12"/>
+                                            <WrapPanel x:Name="InteractionChips" Margin="0,8,0,10"/>
+                                            <Border x:Name="TurnMessagesBox" Visibility="Collapsed" Background="{DynamicResource BgSurfaceAlt}"
+                                                    BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="1" CornerRadius="8"
+                                                    Padding="11,8" Margin="0,0,0,12">
+                                                <StackPanel x:Name="TurnMessagesPanel"/>
+                                            </Border>
 
                                             <Grid Margin="0,0,0,12">
                                                 <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition/>
-                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition x:Name="ShortImpactCol"/>
+                                                    <ColumnDefinition x:Name="ImpactSpacerCol" Width="12"/>
                                                     <ColumnDefinition/>
                                                 </Grid.ColumnDefinitions>
-                                                <Border Background="{DynamicResource BgSurfaceTint}" BorderBrush="{DynamicResource BorderTint}" BorderThickness="1" CornerRadius="10" Padding="13">
+                                                <Border x:Name="ShortImpactCard" Background="{DynamicResource BgSurfaceTint}" BorderBrush="{DynamicResource BorderTint}" BorderThickness="1" CornerRadius="10" Padding="13">
                                                     <StackPanel>
                                                         <TextBlock x:Name="ShortImpactTitle" Text="Ventana de 5 horas" FontWeight="SemiBold" FontSize="12"/>
                                                         <TextBlock x:Name="ShortImpact" Foreground="{DynamicResource AccentPrimary}" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,0"/>

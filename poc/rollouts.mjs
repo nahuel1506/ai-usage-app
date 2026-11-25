@@ -1,22 +1,41 @@
 import { createReadStream } from 'node:fs';
-
 import { createHmac } from 'node:crypto';
 import { open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createZstdDecompress, zstdDecompressSync } from 'node:zlib';
+import { createZstdDecompress } from 'node:zlib';
 import { windowsFromLog } from './app-server.mjs';
 import { projectPath, sessionProject } from './projects.mjs';
 
-const MAX_FILES = 32;
-const TAIL_BYTES = 2 * 1024 * 1024;
+const MAX_FILES = 128;
+const ALWAYS_SCAN_COUNT = 24;
+const RECENT_WINDOW_MS = 35 * 86_400_000;
 const HEADER_BYTES = 64 * 1024;
-const MAX_COMPRESSED = 8 * 1024 * 1024;
-const MAX_EXPANDED = 32 * 1024 * 1024;
+const MAX_COMPRESSED = 128 * 1024 * 1024;
 const MAX_SESSION_LINE = 64 * 1024 * 1024;
+const FAST_SKIP_THRESHOLD = 4096;
+const RELEVANT_MARKERS = [
+  'token_usage_record',
+  'token_count',
+  'task_started',
+  'task_complete',
+  'turn_aborted',
+  'turn_context',
+  'session_meta',
+  'user_message',
+  'user.',
+].map(s => Buffer.from(s, 'utf8'));
+
 const usageKeys = [
   'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
   'output_tokens', 'reasoning_output_tokens', 'total_tokens',
 ];
+
+function bufferHasRelevantMarker(buf) {
+  for (let i = 0; i < RELEVANT_MARKERS.length; i++) {
+    if (buf.includes(RELEVANT_MARKERS[i])) return true;
+  }
+  return false;
+}
 
 function parseLine(line) {
   try { return JSON.parse(line.replace(/^\uFEFF/, '')); } catch { return null; }
@@ -41,30 +60,6 @@ async function readPart(file, bytes, start) {
   return target.subarray(0, offset);
 }
 
-async function readRollout(path, limit) {
-  const file = await open(path, 'r');
-  try {
-    const { size } = await file.stat();
-    if (path.endsWith('.zst')) {
-      if (size > MAX_COMPRESSED) return null;
-      const archive = await readPart(file, size, 0);
-      const expanded = zstdDecompressSync(archive, { maxOutputLength: MAX_EXPANDED });
-      return {
-        head: plainRange(expanded.subarray(0, HEADER_BYTES), 0, expanded.length <= HEADER_BYTES),
-        lines: plainRange(expanded, 0, true),
-        truncated: false,
-      };
-    }
-    const start = Math.max(0, size - limit);
-    const tail = await readPart(file, size - start, start);
-    const lines = plainRange(tail, start, false);
-    const head = start ? plainRange(await readPart(file, Math.min(HEADER_BYTES, size), 0), 0, false) : lines;
-    return { head, lines, truncated: Boolean(start) };
-  } finally {
-    await file.close();
-  }
-}
-
 function sessionMetadata(head) {
   return head.map(parseLine).find(event => event?.type === 'session_meta')?.payload;
 }
@@ -72,6 +67,10 @@ function sessionMetadata(head) {
 function sessionReference(salt, thread) {
   return typeof thread === 'string'
     ? createHmac('sha256', salt).update('session/' + thread).digest('hex').slice(0, 16) : null;
+}
+
+function addLabels(previous, next) {
+  return [...new Set([...(previous ?? []), ...(next ?? [])].filter(Boolean))];
 }
 
 function createRolloutReader(head, accountId, salt, includePreviews) {
@@ -85,6 +84,7 @@ function createRolloutReader(head, accountId, salt, includePreviews) {
   const reference = id => createHmac('sha256', salt).update(id).digest('hex').slice(0, 16);
   let malformed = 0;
   let omittedRequests = 0;
+  let activeTurnId = null;
 
   function add(line) {
     if (!line.trim()) return;
@@ -108,22 +108,34 @@ function createRolloutReader(head, accountId, salt, includePreviews) {
     const isStart = event.type === 'event_msg' && payload.type === 'task_started';
     const isEnd = event.type === 'event_msg' && ['task_complete', 'turn_aborted'].includes(payload.type);
     const isContext = event.type === 'turn_context';
+    const isEventUser = event.type === 'event_msg' && payload.type === 'user_message';
     const chat = payload.internal_chat_message_metadata_passthrough;
     const userItems = event.type === 'response_item' && payload.type === 'message' && payload.role === 'user'
       && Array.isArray(chat?.content_item_kinds)
-      ? chat.content_item_kinds.flatMap((kind, index) =>
-        typeof kind === 'string' && kind.startsWith('user.')
-        && chat.content_item_metadata?.[index]?.provenance?.type === 'user' ? [index] : [])
+      ? chat.content_item_kinds.flatMap((kind, index) => {
+        if (typeof kind !== 'string' || !kind.startsWith('user.')) return [];
+        const provenance = chat.content_item_metadata?.[index]?.provenance?.type;
+        return provenance === undefined || provenance === 'user' ? [index] : [];
+      })
       : [];
-    const isUser = userItems.length > 0;
+    const isUser = userItems.length > 0 || isEventUser;
     if (!isRequest && !isStart && !isEnd && !isContext && !isUser) return;
 
-    const turnId = isUser ? chat.turn_id : payload.turn_id;
+    if (isStart && typeof payload.turn_id === 'string') activeTurnId = payload.turn_id;
+    else if (isContext && typeof payload.turn_id === 'string' && !activeTurnId) activeTurnId = payload.turn_id;
+
+    const turnId = isEventUser
+      ? (typeof payload.turn_id === 'string' ? payload.turn_id : activeTurnId)
+      : isUser
+        ? (typeof chat?.turn_id === 'string' ? chat.turn_id : activeTurnId)
+        : payload.turn_id;
     const threadId = payload.thread_id ?? thread;
     if (typeof turnId !== 'string' || typeof threadId !== 'string') {
       if (isRequest) omittedRequests++;
       return;
     }
+    if (isEnd && activeTurnId === turnId) activeTurnId = null;
+
     const key = reference(threadId + '/' + turnId);
     const turn = turns.get(key) ?? { key, session: sessionReference(salt, threadId), scope, started: null, ended: null, first: Infinity, last: -Infinity };
     if (!isContext && !isUser) {
@@ -144,17 +156,24 @@ function createRolloutReader(head, accountId, salt, includePreviews) {
       turn.composer = attribution?.turn_trigger === 'composer';
     }
     if (isUser) {
-      const key = reference('message/' + (payload.id ?? turnId + '/' + time));
+      const msgKey = reference('message/' + (payload.id ?? turnId + '/' + time));
       turn.messages ??= new Map();
       let preview;
       if (includePreviews && scope === 'same') {
-        const text = userItems.flatMap(index => {
-          const item = payload.content?.[index];
-          return item?.type === 'input_text' && typeof item.text === 'string' ? [item.text.slice(0, 180)] : [];
-        }).join(' ').replace(/\s+/g, ' ').trim();
+        let text = '';
+        if (isEventUser) {
+          const rawText = typeof payload.message === 'string' ? payload.message
+            : typeof payload.text === 'string' ? payload.text : '';
+          text = rawText.slice(0, 180).replace(/\s+/g, ' ').trim();
+        } else {
+          text = userItems.flatMap(index => {
+            const item = payload.content?.[index];
+            return item?.type === 'input_text' && typeof item.text === 'string' ? [item.text.slice(0, 180)] : [];
+          }).join(' ').replace(/\s+/g, ' ').trim();
+        }
         preview = text.length > 96 ? text.slice(0, 96).trimEnd() + '…' : text || undefined;
       }
-      turn.messages.set(key, { time, preview });
+      if (!turn.messages.has(msgKey) || preview) turn.messages.set(msgKey, { time, preview });
     }
     if (isEnd && (turn.ended === null || time >= turn.ended)) {
       turn.ended = time;
@@ -198,7 +217,6 @@ function createRolloutReader(head, accountId, salt, includePreviews) {
   };
 }
 
-
 export function summarizeRollout(head, lines, accountId, salt, includePreviews = false) {
   const reader = createRolloutReader(head, accountId, salt, includePreviews);
   for (const line of lines) reader.add(line);
@@ -207,7 +225,7 @@ export function summarizeRollout(head, lines, accountId, salt, includePreviews =
 
 async function appendSession(state, path, size) {
   const compressed = path.endsWith('.zst');
-  if (size === state.cursor && !compressed) return;
+  if (!compressed && size <= state.cursor) return;
   const source = createReadStream(path, compressed ? {} : { start: state.cursor, end: size - 1 });
   const decoder = compressed ? createZstdDecompress() : null;
   if (decoder) source.once('error', error => decoder.destroy(error));
@@ -215,17 +233,22 @@ async function appendSession(state, path, size) {
   let parts = [];
   let length = 0;
   let cursor = state.cursor;
+  function feedBuffer(buf) {
+    if (buf.length > FAST_SKIP_THRESHOLD && !bufferHasRelevantMarker(buf)) return;
+    state.reader.add(buf.toString('utf8'));
+  }
   try {
     for await (const chunk of stream) {
       let start = 0;
       for (let end = chunk.indexOf(10, start); end !== -1; end = chunk.indexOf(10, start)) {
         const piece = chunk.subarray(start, end);
-        if (length + piece.length <= MAX_SESSION_LINE) {
-          state.reader.add(parts.length ? Buffer.concat([...parts, piece]).toString('utf8') : piece.toString('utf8'));
+        const totalLen = length + piece.length;
+        if (totalLen <= MAX_SESSION_LINE) {
+          feedBuffer(parts.length ? Buffer.concat([...parts, piece]) : piece);
         } else {
           state.skippedLines++;
         }
-        cursor += length + piece.length + 1;
+        cursor += totalLen + 1;
         state.cursor = cursor;
         parts = [];
         length = 0;
@@ -239,10 +262,9 @@ async function appendSession(state, path, size) {
       }
     }
     if (compressed && length) {
-      if (length <= MAX_SESSION_LINE) state.reader.add(Buffer.concat(parts).toString('utf8'));
+      if (length <= MAX_SESSION_LINE) feedBuffer(Buffer.concat(parts));
       else state.skippedLines++;
     }
-
   } finally {
     source.destroy();
     if (compressed) stream.destroy();
@@ -253,24 +275,24 @@ async function readSelectedRollout(entry, accountId, salt, includePreviews, cach
   const info = await stat(entry.path);
   const compressed = entry.path.endsWith('.zst');
   let state = cache.get(entry.path);
-  if (!state || state.accountId !== accountId || state.ino !== info.ino || info.size < state.cursor && !compressed ||
-      compressed && state.mtime !== info.mtimeMs) {
+  if (!state || state.accountId !== accountId || state.includePreviews !== includePreviews
+      || state.ino !== info.ino || (!compressed && info.size < state.cursor)
+      || (compressed && (state.mtime !== info.mtimeMs || state.size !== info.size))) {
     state = {
-      cursor: 0, skippedLines: 0, accountId, ino: info.ino,
+      cursor: 0, skippedLines: 0, accountId, includePreviews, ino: info.ino, mtime: -1, size: 0,
       reader: createRolloutReader(entry.head, accountId, salt, includePreviews),
     };
     cache.set(entry.path, state);
   }
-  if (state.mtime !== info.mtimeMs) {
-
+  const needsRead = compressed
+    ? (state.mtime !== info.mtimeMs || state.size !== info.size)
+    : (state.mtime !== info.mtimeMs || state.cursor !== info.size);
+  if (needsRead) {
     await appendSession(state, entry.path, info.size);
     state.mtime = info.mtimeMs;
+    state.size = info.size;
   }
   return { ...state.reader.result(), skippedLines: state.skippedLines };
-}
-
-function addLabels(previous, next) {
-  return [...new Set([...(previous ?? []), ...(next ?? [])].filter(Boolean))];
 }
 
 function mtimeIso(mtime) {
@@ -318,8 +340,7 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
         try {
           const info = await stat(absolute);
           files.push({ absolute, mtime: info.mtimeMs, size: info.size, ino: info.ino });
-        }
-        catch { skipped++; }
+        } catch { skipped++; }
       }
     } catch { unavailableRoots++; }
   }
@@ -340,8 +361,10 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
     const thread = meta?.id ?? meta?.session_id;
     const reference = sessionReference(salt, thread);
     if (reference && accountId && meta?.creator_account_id === accountId) {
-      sessionFiles.set(absolute, { path: absolute, head, thread, cwd: meta.cwd, reference, mtime,
-        startedAt: meta.timestamp, partial });
+      sessionFiles.set(absolute, {
+        path: absolute, head, thread, cwd: meta.cwd, reference, mtime,
+        startedAt: meta.timestamp, partial,
+      });
     }
   }
   const recentCache = workspace?.recentCache;
@@ -362,33 +385,52 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
     return head;
   }
 
-  for (const file of files.slice(0, MAX_FILES)) {
+  const recentCutoff = Date.now() - RECENT_WINDOW_MS;
+  for (let fileIndex = 0; fileIndex < Math.min(files.length, MAX_FILES); fileIndex++) {
+    const file = files[fileIndex];
     const { absolute, mtime, size, ino } = file;
+    const compressed = absolute.endsWith('.zst');
     try {
-      const cached = recentCache?.get(absolute);
-      if (cached && cached.mtime === mtime && cached.size === size && cached.ino === ino
-          && cached.accountId === accountId && cached.includePreviews === includePreviews) {
-        if (cached.skipped) {
-          coverage.skippedFiles++;
-          if (workspace && cached.head) register(absolute, mtime, cached.head, true);
-          continue;
-        }
-        collected.push({ path: absolute, result: cached.result, truncated: cached.truncated });
-        if (workspace && cached.result.scope === 'same') register(absolute, mtime, cached.head, cached.truncated);
-        continue;
-      }
-      const part = await readRollout(absolute, TAIL_BYTES);
-      if (!part) {
-        coverage.skippedFiles++;
-        const head = workspace && absolute.endsWith('.zst') ? await cachedHeader(file) : null;
+      if (fileIndex >= ALWAYS_SCAN_COUNT && mtime < recentCutoff && workspace) {
+        const head = await cachedHeader(file);
         if (head) register(absolute, mtime, head, true);
-        recentCache?.set(absolute, { mtime, size, ino, accountId, includePreviews, skipped: true, head });
         continue;
       }
-      const result = summarizeRollout(part.head, part.lines, accountId, salt, includePreviews);
-      recentCache?.set(absolute, { mtime, size, ino, accountId, includePreviews, skipped: false, head: part.head, result, truncated: part.truncated });
-      collected.push({ path: absolute, result, truncated: part.truncated });
-      if (workspace && result.scope === 'same') register(absolute, mtime, part.head, part.truncated);
+      if (compressed && size > MAX_COMPRESSED) {
+        coverage.skippedFiles++;
+        const head = workspace ? await cachedHeader(file) : null;
+        if (head) register(absolute, mtime, head, true);
+        continue;
+      }
+
+      let state = recentCache?.get(absolute);
+      const needsReset = !state || state.accountId !== accountId || state.includePreviews !== includePreviews
+        || state.ino !== ino || (!compressed && size < state.cursor)
+        || (compressed && (state.mtime !== mtime || state.size !== size));
+
+      if (needsReset) {
+        const head = await cachedHeader(file);
+        state = {
+          cursor: 0, skippedLines: 0, accountId, includePreviews, ino, mtime: -1, size: 0, head,
+          reader: createRolloutReader(head, accountId, salt, includePreviews),
+        };
+        recentCache?.set(absolute, state);
+      }
+
+      const needsRead = compressed
+        ? (state.mtime !== mtime || state.size !== size)
+        : (state.mtime !== mtime || state.cursor !== size);
+
+      if (needsRead) {
+        await appendSession(state, absolute, size);
+        state.mtime = mtime;
+        state.size = size;
+      }
+
+      const result = state.reader.result();
+      const truncated = Boolean(state.skippedLines);
+      collected.push({ path: absolute, result, truncated, full: true });
+      if (workspace && result.scope === 'same') register(absolute, mtime, state.head, truncated);
     } catch { coverage.skippedFiles++; }
   }
 
@@ -423,15 +465,20 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
     if (selectedSession) {
       let partial = false;
       for (const entry of selectedPaths) {
+        const existingIndex = collected.findIndex(item => item.path === entry.path);
+        if (existingIndex !== -1 && collected[existingIndex].full) {
+          const existing = collected[existingIndex];
+          partial ||= Boolean(existing.truncated || existing.result.malformed);
+          continue;
+        }
         try {
           const full = await readSelectedRollout(entry, accountId, salt, includePreviews, workspace.cache);
           partial ||= Boolean(full.skippedLines || full.malformed);
-          const index = collected.findIndex(item => item.path === entry.path);
-          const item = { path: entry.path, result: full, truncated: Boolean(full.skippedLines) };
-          if (index === -1) {
+          const item = { path: entry.path, result: full, truncated: Boolean(full.skippedLines), full: true };
+          if (existingIndex === -1) {
             collected.push(item);
             if (files.slice(0, MAX_FILES).some(file => file.absolute === entry.path)) coverage.skippedFiles--;
-          } else collected[index] = item;
+          } else collected[existingIndex] = item;
         } catch {
           partial = true;
         }
@@ -473,8 +520,8 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
       prior.composer ||= turn.composer;
       if (turn.messages) {
         prior.messages ??= new Map();
-        for (const [key, message] of turn.messages)
-          if (!prior.messages.has(key) || message.preview) prior.messages.set(key, message);
+        for (const [msgKey, message] of turn.messages)
+          if (!prior.messages.has(msgKey) || message.preview) prior.messages.set(msgKey, message);
       }
       prior.models = addLabels(prior.models, turn.models);
       prior.efforts = addLabels(prior.efforts, turn.efforts);
@@ -487,6 +534,8 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
     }
     snapshots.push(...result.snapshots.map(row => ({ ...row, scope: result.scope })));
   }
-  return { coverage, turns, requests, snapshots, sessionCatalog, selectedSession,
-    projects: workspace?.projectIndex ? workspace.projectIndex.projectList : null };
+  return {
+    coverage, turns, requests, snapshots, sessionCatalog, selectedSession,
+    projects: workspace?.projectIndex ? workspace.projectIndex.projectList : null,
+  };
 }
