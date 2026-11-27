@@ -68,11 +68,23 @@ export function quotaObservations(history, live, until, options = {}) {
   return series;
 }
 
-function buildTurnIndex(turns) {
+export function antigravityRequestPool(req, turn) {
+  const model = req.model ?? (turn?.models?.length === 1 ? turn.models[0] : '');
+  return /gemini/i.test(model) ? 'gemini' : /claude|gpt/i.test(model) ? 'claude_gpt' : null;
+}
+
+function buildTurnIndex(history) {
+  const { turns } = history;
+  const pools = new Map();
+  for (const req of history.requests?.values() ?? []) {
+    const pool = antigravityRequestPool(req, turns.get(req.turn));
+    pools.set(req.turn, pools.has(req.turn) && pools.get(req.turn) !== pool ? null : pool);
+  }
   const list = [];
   for (const turn of turns.values()) {
     list.push({
       key: turn.key,
+      pool: pools.get(turn.key),
       start: turn.started ?? turn.first,
       end: turn.ended ?? turn.last,
     });
@@ -83,26 +95,26 @@ function buildTurnIndex(turns) {
 
 const turnIndexCache = new WeakMap();
 
-function getTurnIndex(turns) {
-  let index = turnIndexCache.get(turns);
+function getTurnIndex(history) {
+  let index = turnIndexCache.get(history);
   if (!index) {
-    index = buildTurnIndex(turns);
-    turnIndexCache.set(turns, index);
+    index = buildTurnIndex(history);
+    turnIndexCache.set(history, index);
   }
   return index;
 }
 
-function overlappingTurns(index, members, from, to) {
+function overlappingTurns(index, members, from, to, pool) {
   let count = 0;
   for (let i = 0; i < index.length; i++) {
     const item = index[i];
     if (item.start > to) break;
-    if (item.end > from && !members.has(item.key)) count++;
+    if (item.end > from && !members.has(item.key) && (!pool || !item.pool || item.pool === pool)) count++;
   }
   return count;
 }
 
-function findNextStart(index, members, end) {
+function findNextStart(index, members, end, pool) {
   let low = 0;
   let high = index.length;
   while (low < high) {
@@ -111,7 +123,8 @@ function findNextStart(index, members, end) {
     else high = mid;
   }
   for (let i = low; i < index.length; i++) {
-    if (!members.has(index[i].key)) return index[i].start;
+    const item = index[i];
+    if (!members.has(item.key) && (!pool || !item.pool || item.pool === pool)) return item.start;
   }
   return Infinity;
 }
@@ -146,7 +159,7 @@ function measureWindow(minutes, samples, turn, turnIndex, pool = null) {
   const relevant = samples.slice(lowerBound(samples, start - BEFORE_MS), lowerBound(samples, end + AFTER_MS + 1));
   const before = latestReading(relevant.slice(0, lowerBound(relevant, start + 1)));
   const afterEnd = relevant.filter(row => row.time >= end);
-  const nextStart = findNextStart(turnIndex, members, end);
+  const nextStart = findNextStart(turnIndex, members, end, pool);
   const beforeNext = afterEnd.filter(row => row.time < nextStart);
   const after = latestReading(beforeNext) ?? afterEnd[0];
   const inside = relevant.filter(row => row.time >= start && row.time <= end);
@@ -179,17 +192,17 @@ function measureWindow(minutes, samples, turn, turnIndex, pool = null) {
   })) return { ...result, status: 'discontinuity' };
 
   const deltaPp = Number((right.usedPercent - left.usedPercent).toFixed(6));
-  const otherTurns = overlappingTurns(turnIndex, members, left.time, right.time);
+  const otherTurns = overlappingTurns(turnIndex, members, left.time, right.time, pool);
   const status = !result.hasStart || !result.hasEnd ? 'partial' : otherTurns ? 'shared' : 'observed';
   return { ...result, status, deltaPp, otherTurns, plan: right.plan ?? left.plan, ...(fluctuated ? { fluctuated: true } : {}) };
 }
 
 export function interactionQuota(series, turn, history) {
-  const turnIndex = getTurnIndex(history.turns);
+  const turnIndex = getTurnIndex(history);
   return [...series].map(([key, value]) =>
     Array.isArray(value)
       ? measureWindow(key, value, turn, turnIndex)
-      : measureWindow(value.minutes, value.samples, turn, turnIndex, value.pool));
+      : turn.pool === value.pool ? measureWindow(value.minutes, value.samples, turn, turnIndex, value.pool) : null).filter(Boolean);
 }
 
 function quotaPeriods(samples, minutes) {
@@ -232,7 +245,7 @@ function periodTotal(minutes, period, turns, turnIndex, from = period.start, to 
   const active = turns.filter(turn => turn.end >= from && turn.start < to);
   const samples = period.samples.slice(lowerBound(period.samples, from), lowerBound(period.samples, to));
   const intervals = active.flatMap(turn => {
-    const impact = measureWindow(minutes, samples, turn, turnIndex);
+    const impact = measureWindow(minutes, samples, turn, turnIndex, turn.pool === "codex" ? null : turn.pool);
     if (!Number.isFinite(impact.deltaPp) || impact.otherTurns) return [];
     return [{
       start: Date.parse(impact.before.at), end: Date.parse(impact.after.at),
@@ -260,7 +273,7 @@ function periodTotal(minutes, period, turns, turnIndex, from = period.start, to 
 
 export function sessionQuotaHistory(series, quotaTurns, history, until) {
   const turns = quotaTurns.map(turn => ({ ...turn, ...turnBounds(turn) }));
-  const turnIndex = getTurnIndex(history.turns);
+  const turnIndex = getTurnIndex(history);
   const pools = new Map();
   for (const [key, value] of series) {
     const { pool = 'codex', minutes, samples } = Array.isArray(value) ? { minutes: key, samples: value } : value;
@@ -275,18 +288,19 @@ export function sessionQuotaHistory(series, quotaTurns, history, until) {
     resetsAt: new Date(period.time).toISOString(), active: period.start <= until && period.end > until,
   });
   for (const [pool, windows] of pools) {
+    const eligibleTurns = pool === "codex" ? turns : turns.filter(turn => turn.pool === pool);
     const weekly = windows.get(10080) ?? [];
     for (const period of weekly) {
-      const total = periodTotal(10080, period, turns, turnIndex);
+      const total = periodTotal(10080, period, eligibleTurns, turnIndex);
       const range = dates(pool, period);
       if (total.activities || range.active) weeks.push({ ...range, ...total });
     }
     for (const period of windows.get(300) ?? []) {
-      const short = periodTotal(300, period, turns, turnIndex);
+      const short = periodTotal(300, period, eligibleTurns, turnIndex);
       if (!short.activities) continue;
       const weeklyParts = weekly.filter(week => week.start < period.end && week.end > period.start).map(week => ({
         resetsAt: new Date(week.time).toISOString(),
-        ...periodTotal(10080, week, turns, turnIndex, Math.max(week.start, period.start), Math.min(week.end, period.end)),
+        ...periodTotal(10080, week, eligibleTurns, turnIndex, Math.max(week.start, period.start), Math.min(week.end, period.end)),
       }));
       blocks.push({ ...dates(pool, period), short, weekly: weeklyParts });
     }

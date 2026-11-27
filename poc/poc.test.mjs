@@ -37,7 +37,7 @@ test('cuenta tokens de caché una sola vez y conserva la cobertura de los totale
 
 test('estima un rango con prompts aislados del plan actual y excluye envíos combinados', () => {
   const history = { turns: new Map(), requests: new Map(), snapshots: [] };
-  for (let i = 1, used = 0; i <= 10; i++) {
+  for (let i = 1, used = 0; i <= 12; i++) {
     const start = i * 250;
     const plan = i === 1 ? 'old-plan' : 'plus';
     const time = offset => Date.parse(at(start + offset));
@@ -48,13 +48,66 @@ test('estima un rango con prompts aislados del plan actual y excluye envíos com
       started: time(0), ended: time(10), first: time(2), last: time(8) });
     history.requests.set(key, { turn: key, scope: 'same', time: time(8), usage: { input_tokens: 100 } });
     for (const [offset, usedPercent] of [[-1, used], [11, used + i]]) {
-      history.snapshots.push({ ...row(usedPercent, at(3000)), time: time(offset),
+      history.snapshots.push({ ...row(usedPercent, at(4000)), time: time(offset),
         source: 'app-server', scope: 'same', plan });
     }
     used += i;
   }
-  const analytics = analyticsSummary(history, Date.parse(at(2800)));
+  const analytics = analyticsSummary(history, Date.parse(at(2650)));
   assert.deepEqual(analytics.promptQuota, [{ pool: 'codex', minutes: 300, count: 8, typical: 6.5, low: 4.75, high: 8.25 }]);
+  // The later two drops exceed the ranges learned from earlier prompts in this fixture.
+  const validated = analyticsSummary(history, Date.parse(at(3300))).promptQuota[0];
+  assert.deepEqual(validated.validation, { inside: 0, checked: 2 });
+});
+
+test('separa prompts simultáneos de grupos distintos y excluye los envíos fuera del período', () => {
+  const time = seconds => Date.parse(at(seconds));
+  const until = time(86405);
+  const types = [
+    ['gemini', 'gemini-test', 3, 'gemini-chat'],
+    ['claude_gpt', 'claude-test', 6, 'claude-chat'],
+  ];
+  const history = {
+    ...emptyHistory,
+    turns: new Map(types.map(([pool, model, start, session]) => [pool, {
+      key: pool, session, scope: 'same', composer: true,
+      started: time(start), first: time(8), last: time(10), ended: time(12), models: [model],
+    }])),
+    requests: new Map(types.map(([pool, model]) => [pool, {
+      turn: pool, model, time: time(9), scope: 'same', usage: { input_tokens: 20 },
+    }])),
+    snapshots: types.flatMap(([pool]) => [[2, 20], [13, 27]].map(([seconds, usedPercent]) => ({
+      ...row(usedPercent, at(600)), pool, source: 'agy-cli', scope: 'same', time: time(seconds),
+    }))),
+    sessionCatalog: types.map(([, , , reference]) => ({ reference, title: reference })),
+  };
+  const options = { buckets: types.map(([pool]) => ({ pool, minutes: 300 })) };
+  const details = interactionSummary(history, 0, until, [], false, options);
+  assert.deepEqual(details.turns.map(turn => [turn.quota[0].pool, turn.quota[0].status, turn.quota[0].deltaPp]),
+    [['claude_gpt', 'observed', 7], ['gemini', 'observed', 7]]);
+  const period = analyticsSummary(history, until, 'antigravity', [], options).periods['24h'];
+  assert.deepEqual(period.quotaRankings[0].chats.map(chat => chat.title), ['claude-chat']);
+});
+
+test('excluye de la cuota por modelo una pregunta mixta con un subagente a ambos lados del corte', () => {
+  const time = seconds => Date.parse(at(seconds));
+  const history = {
+    turns: new Map([
+      ['root', { key: 'root', session: 'chat', scope: 'same', composer: true, family: 'family',
+        started: time(3), first: time(4), last: time(4), ended: time(12) }],
+      ['child', { key: 'child', session: 'child-chat', scope: 'same', child: true, family: 'family',
+        started: time(6), first: time(8), last: time(8), ended: time(11) }],
+    ]),
+    requests: new Map([['root', 'gpt-6.2-sol', 4], ['child', 'gpt-6.2-astra', 8]].map(([turn, model, seconds]) =>
+      [turn, { turn, model, time: time(seconds), scope: 'same', usage: { input_tokens: 20 } }])),
+    snapshots: [[2, 20], [13, 27]].map(([seconds, usedPercent]) => ({
+      ...row(usedPercent, at(600)), source: 'app-server', scope: 'same', time: time(seconds),
+    })),
+  };
+  const { periods } = analyticsSummary(history, time(86405));
+  assert.equal(periods['24h'].byModel[0].measured5hTurns, 0);
+  assert.ok(periods['7d'].byModel.every(model => model.measured5hTurns === 0));
+  assert.equal(periods['7d'].quotaRankings[0].prompts[0].drop, 7);
 });
 
 test('cuotas por pool deduplican la copia principal y mantienen las ventanas devueltas', () => {
@@ -303,8 +356,12 @@ test('resume bloques de 5 horas y semanas reales por chat, sin duplicar bajas co
   assert.equal(summary.weeks[1].endsAt, summary.weeks[0].startsAt);
 
   const buckets = [{ pool: 'gemini', minutes: 300 }, { pool: 'gemini', minutes: 10080 }, { pool: 'claude_gpt', minutes: 300 }];
-  const agHistory = { ...history, snapshots: snapshots.map(point => ({ ...point, pool: 'gemini' })) };
+  const agHistory = { ...history,
+    requests: new Map([...history.requests].map(([key, req]) => [key, { ...req, model: 'gemini-test' }])),
+    snapshots: snapshots.flatMap(point => ['gemini', 'claude_gpt'].map(pool => ({ ...point, pool }))),
+  };
   const ag = interactionSummary(agHistory, 0, Date.parse(at(37000)), [], true, { buckets });
+  assert.ok(ag.turns.every(turn => turn.quota.every(impact => impact.pool === 'gemini')));
   assert.deepEqual(ag.sessionQuotaHistory.blocks.map(block => [block.pool, block.short.deltaPp]), [['gemini', 28], ['gemini', 71]]);
 });
 
@@ -332,10 +389,15 @@ test('una pregunta agrupa llamadas propias y delegadas sin convertirlas en otros
     begin(10, 'main', 'main', 'composer'),
     user(11, 'environments.environment_context', 'harness', 'contexto interno'),
     user(12, 'user.text', 'user', 'Una pregunta real'),
-    request(13, 'main', 'main'), request(16, 'main', 'main'),
+    request(13, 'main', 'main'),
+    line('response_item', 14, { type: 'function_call', name: 'shell_command', call_id: 'tool-1', arguments: 'test-private' }),
+    line('response_item', 15, { type: 'function_call', name: 'shell_command', call_id: 'tool-1', arguments: 'test-private' }),
+    request(16, 'main', 'main'),
     user(17, 'user.text', 'user', 'Aclaración'), end(19, 'main'),
   ], 'account-a', salt, true);
-  const child = summarizeRollout(head('thread-b'), [
+  const childHead = [line('session_meta', 0, { id: 'thread-b', creator_account_id: 'account-a',
+    source: { subagent: { thread_spawn: { parent_thread_id: 'thread-a', agent_nickname: 'Fixture Agent' } } } })];
+  const child = summarizeRollout(childHead, [
     begin(14, 'child', 'main', 'agent', 'main'), request(18, 'child', 'main'), end(20, 'child'),
   ], 'account-a', salt);
   const unknown = summarizeRollout(head('thread-c'), [
@@ -352,6 +414,25 @@ test('una pregunta agrupa llamadas propias y delegadas sin convertirlas en otros
   assert.equal(result.observedQuestions, 1);
   assert.equal(result.observedOtherTurns, 1);
   const [question, other] = result.turns;
+  const selectedSession = [...main.turns.values()][0].session;
+  const chat = interactionSummary({ ...history, selectedSession, sessionCatalog: [] }, 0, Date.parse(at(30)), [], true);
+  const measured = chat.turns[0];
+  assert.deepEqual(measured.activity.map(actor => [actor.label, actor.calls, actor.quota.length]),
+    [['Agente principal', 2, 0], ['Fixture Agent', 1, 0]]);
+  assert.deepEqual(measured.toolCalls, [{ name: 'shell_command', actor: 'Agente principal', at: at(14) }]);
+  assert.equal(measured.observedTools, 1);
+  assert.equal(measured.quota[0].deltaPp, 2);
+  assert.ok(!JSON.stringify(chat).includes('test-private'));
+
+  const requests = new Map([...history.requests].map(([key, request]) => [key, {
+    ...request, model: history.turns.get(request.turn)?.child ? 'claude-test' : 'gemini-test',
+  }]));
+  const buckets = ['gemini', 'claude_gpt'].map(pool => ({ pool, minutes: 300 }));
+  const ag = interactionSummary({ ...history, selectedSession, sessionCatalog: [], requests,
+    snapshots: buckets.flatMap(({ pool }) => history.snapshots.map(point => ({ ...point, pool, source: 'agy-cli' }))),
+  }, 0, Date.parse(at(30)), [], true, { buckets });
+  assert.deepEqual(ag.turns[0].activity.map(actor => [actor.label, actor.quota[0]?.pool, actor.quota[0]?.deltaPp]),
+    [['Agente principal', 'gemini', 2], ['Fixture Agent', 'claude_gpt', 2]]);
   assert.equal(question.promptPreview, 'Una pregunta real');
   assert.equal(question.messageCount, 2);
   assert.equal(question.sentAt, at(12));

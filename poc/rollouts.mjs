@@ -98,6 +98,9 @@ function createRolloutReader(head, accountId, salt, includePreviews, verifiedThr
   const thread = meta?.id ?? meta?.session_id;
   const parentThread = parentThreadOf(meta);
   const isSubagent = isSubagentMeta(meta);
+  const spawn = meta?.source?.subagent?.thread_spawn;
+  const nickname = spawn?.agent_nickname ?? meta?.agent_nickname;
+  const agentName = typeof nickname === 'string' ? nickname.trim().slice(0, 80) : undefined;
   const verifiedByCatalog = Boolean(
     accountId && verifiedThreads && ((thread && verifiedThreads.has(thread)) || (parentThread && verifiedThreads.has(parentThread))),
   );
@@ -131,6 +134,8 @@ function createRolloutReader(head, accountId, salt, includePreviews, verifiedThr
     }
 
     const isRequest = event.type === 'token_usage_record';
+    const isToolCall = event.type === 'response_item' &&
+      ['function_call', 'custom_tool_call', 'web_search_call', 'mcp_call'].includes(payload.type);
     const isStart = event.type === 'event_msg' && payload.type === 'task_started';
     const isEnd = event.type === 'event_msg' && ['task_complete', 'turn_aborted'].includes(payload.type);
     const isContext = event.type === 'turn_context';
@@ -145,12 +150,12 @@ function createRolloutReader(head, accountId, salt, includePreviews, verifiedThr
       })
       : [];
     const isUser = userItems.length > 0 || isEventUser;
-    if (!isRequest && !isStart && !isEnd && !isContext && !isUser) return;
+    if (!isToolCall && !isRequest && !isStart && !isEnd && !isContext && !isUser) return;
 
     if (isStart && typeof payload.turn_id === 'string') activeTurnId = payload.turn_id;
     else if (isContext && typeof payload.turn_id === 'string' && !activeTurnId) activeTurnId = payload.turn_id;
 
-    const turnId = isEventUser
+    const turnId = isToolCall ? payload.turn_id ?? activeTurnId : isEventUser
       ? (typeof payload.turn_id === 'string' ? payload.turn_id : activeTurnId)
       : isUser
         ? (typeof chat?.turn_id === 'string' ? chat.turn_id : activeTurnId)
@@ -166,7 +171,7 @@ function createRolloutReader(head, accountId, salt, includePreviews, verifiedThr
     const effectiveSession = sessionReference(salt, parentThread ?? threadId);
     const turn = turns.get(key) ?? {
       key, session: effectiveSession, scope, started: null, ended: null, first: Infinity, last: -Infinity,
-      ...(isSubagent ? { child: true } : {}),
+      ...(isSubagent ? { child: true, agentReference: reference("agent/" + threadId), agentName } : {}),
     };
     if (!isContext && !isUser) {
       turn.first = Math.min(turn.first, time);
@@ -209,6 +214,14 @@ function createRolloutReader(head, accountId, salt, includePreviews, verifiedThr
       turn.ended = time;
       turn.outcome = payload.type === 'turn_aborted' ? 'aborted' : payload.error ? 'error' : 'completed';
       if (Number.isSafeInteger(payload.duration_ms) && payload.duration_ms >= 0) turn.durationMs = payload.duration_ms;
+    }
+    if (isToolCall && scope === 'same') {
+      const id = payload.call_id ?? payload.id;
+      const name = typeof payload.name === 'string' && /^[a-z0-9_.:-]{1,100}$/i.test(payload.name)
+        ? payload.name : payload.type;
+      const callRef = reference('tool/' + threadId + '/' + (id ?? time + '/' + name));
+      turn.tools ??= new Map();
+      if (!turn.tools.has(callRef)) turn.tools.set(callRef, { time, name });
     }
     if (isContext) {
       // Only retain machine identifiers, not free-text settings from the context record.
@@ -572,7 +585,13 @@ export async function recentHistory(home, accountId, salt, includePreviews = fal
       prior.family ??= turn.family;
       prior.familyConflict ||= turn.familyConflict;
       prior.child ||= turn.child;
+      prior.agentReference ??= turn.agentReference;
+      prior.agentName ??= turn.agentName;
       prior.composer ||= turn.composer;
+      if (turn.tools) {
+        prior.tools ??= new Map();
+        for (const [key, tool] of turn.tools) if (!prior.tools.has(key)) prior.tools.set(key, tool);
+      }
       if (turn.messages) {
         prior.messages ??= new Map();
         for (const [msgKey, message] of turn.messages)

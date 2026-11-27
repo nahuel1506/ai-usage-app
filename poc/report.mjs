@@ -1,4 +1,4 @@
-import { interactionQuota, quotaObservations, sessionQuotaHistory } from './interaction-quota.mjs';
+import { antigravityRequestPool, interactionQuota, quotaObservations, sessionQuotaHistory } from './interaction-quota.mjs';
 import { aggregateCosts, priceRequest, pricingCatalogStatus } from './pricing.mjs';
 
 function bucket(row) {
@@ -135,6 +135,12 @@ function resolveReqModel(req, turn) {
   return req.model ?? (turn?.models?.length === 1 ? turn.models[0] : null) ?? 'Sin identificar';
 }
 
+function quotaPool(provider, requests, history) {
+  if (provider === 'codex') return 'codex';
+  const pools = new Set(requests.map(req => antigravityRequestPool(req, history.turns.get(req.turn))));
+  return pools.size === 1 ? [...pools][0] : null;
+}
+
 function pickQuotaDelta(quotaList, minutes, provider, modelName) {
   if (!Array.isArray(quotaList)) return null;
   const preferredPool = provider === 'antigravity'
@@ -148,18 +154,18 @@ function pickQuotaDelta(quotaList, minutes, provider, modelName) {
   return match.deltaPp;
 }
 
-function buildModelEffortComparison(requests, history, provider, turnQuotaMap) {
+function buildModelEffortComparison(requests, history, provider, turnQuotaMap, resolveRoot = key => key, quotaRequests = requests) {
   const groups = new Map();
   const byModel = new Map();
   const turnLabels = new Map();
-  for (const req of requests) {
+  for (const req of quotaRequests) {
     const turn = history.turns.get(req.turn);
     const model = resolveReqModel(req, turn);
     const effort = resolveReqEffort(req, turn);
-    const labels = turnLabels.get(req.turn) ?? { model, effort };
+    const labels = turnLabels.get(resolveRoot(req.turn)) ?? { model, effort };
     if (labels.model !== model) labels.model = null;
     if (labels.effort !== effort) labels.effort = null;
-    turnLabels.set(req.turn, labels);
+    turnLabels.set(resolveRoot(req.turn), labels);
   }
 
   for (const req of requests) {
@@ -197,16 +203,16 @@ function buildModelEffortComparison(requests, history, provider, turnQuotaMap) {
       row.saved += saved;
       row.pricedRequests++;
     }
-    const labels = turnLabels.get(req.turn);
-    const q = labels.model && model !== 'Sin identificar' ? turnQuotaMap?.get(req.turn) : null;
+    const labels = turnLabels.get(resolveRoot(req.turn));
+    const q = labels.model && model !== 'Sin identificar' ? turnQuotaMap?.get(resolveRoot(req.turn)) : null;
     if (q && labels.effort) {
-      if (!row.drop5hTurns.has(req.turn)) {
+      if (!row.drop5hTurns.has(resolveRoot(req.turn))) {
         const d5 = pickQuotaDelta(q, 300, provider, model);
-        if (d5 !== null) { row.drop5hSum += d5; row.drop5hTurns.add(req.turn); }
+        if (d5 !== null) { row.drop5hSum += d5; row.drop5hTurns.add(resolveRoot(req.turn)); }
       }
-      if (!row.dropWeekTurns.has(req.turn)) {
+      if (!row.dropWeekTurns.has(resolveRoot(req.turn))) {
         const dw = pickQuotaDelta(q, 10080, provider, model);
-        if (dw !== null) { row.dropWeekSum += dw; row.dropWeekTurns.add(req.turn); }
+        if (dw !== null) { row.dropWeekSum += dw; row.dropWeekTurns.add(resolveRoot(req.turn)); }
       }
     }
 
@@ -232,13 +238,13 @@ function buildModelEffortComparison(requests, history, provider, turnQuotaMap) {
       mAgg.pricedRequests++;
     }
     if (q) {
-      if (!mAgg.drop5hTurns.has(req.turn)) {
+      if (!mAgg.drop5hTurns.has(resolveRoot(req.turn))) {
         const d5 = pickQuotaDelta(q, 300, provider, model);
-        if (d5 !== null) { mAgg.drop5hSum += d5; mAgg.drop5hTurns.add(req.turn); }
+        if (d5 !== null) { mAgg.drop5hSum += d5; mAgg.drop5hTurns.add(resolveRoot(req.turn)); }
       }
-      if (!mAgg.dropWeekTurns.has(req.turn)) {
+      if (!mAgg.dropWeekTurns.has(resolveRoot(req.turn))) {
         const dw = pickQuotaDelta(q, 10080, provider, model);
-        if (dw !== null) { mAgg.dropWeekSum += dw; mAgg.dropWeekTurns.add(req.turn); }
+        if (dw !== null) { mAgg.dropWeekSum += dw; mAgg.dropWeekTurns.add(resolveRoot(req.turn)); }
       }
     }
   }
@@ -462,7 +468,7 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
   const avgCostPerTurnUsd = turnCount > 0 && apiCost.usd !== null
     ? Number((apiCost.usd / turnCount).toFixed(4)) : null;
 
-  const { models, byModelEffort } = buildModelEffortComparison(filtered, history, provider, turnQuotaMap);
+  const { models, byModelEffort } = buildModelEffortComparison(filtered, history, provider, turnQuotaMap, resolveTurnRoot, sameRequests);
 
   // 1. Top 5 costliest prompts in this period
   const topPrompts = [...turnAggs.values()]
@@ -482,6 +488,36 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
       drop5hPp: t.drop5hPp,
       dropWeekPp: t.dropWeekPp,
     }));
+
+  const quotaRankings = [300, 10080].map(minutes => {
+    const metric = minutes === 300 ? 'drop5hPp' : 'dropWeekPp';
+    const prompts = [];
+    const chats = new Map();
+    const timeline = new Map();
+    for (const turn of turnAggs.values()) {
+      if (turn.time <= since || turn.time > until || !(turn[metric] > 0) || !isQuestion(history.turns.get(turn.reference) ?? {})) continue;
+      const impact = turnQuotaMap.get(turn.reference)?.find(q => q.minutes === minutes && q.status === 'observed');
+      const pool = impact?.pool ?? 'codex';
+      const at = new Date(turn.time).toISOString();
+      const drop = turn[metric];
+      prompts.push({ title: turn.preview || 'Prompt sin vista previa', at, drop, pool, model: turn.model });
+      if (turn.session) {
+        const key = JSON.stringify([pool, turn.session]);
+        const row = chats.get(key) ?? { title: sessionTitles.get(turn.session) || 'Chat local', pool, drop: 0, at };
+        row.drop += drop;
+        if (at > row.at) row.at = at;
+        chats.set(key, row);
+      }
+      const day = localDayKey(turn.time);
+      const key = JSON.stringify([pool, day]);
+      const point = timeline.get(key) ?? { title: day, pool, drop: 0, at };
+      point.drop += drop;
+      timeline.set(key, point);
+    }
+    const rank = rows => [...rows].sort((a, b) => b.drop - a.drop || b.at.localeCompare(a.at)).slice(0, 8);
+    return { minutes, prompts: rank(prompts), chats: rank(chats.values()),
+      timeline: [...timeline.values()].sort((a, b) => b.title.localeCompare(a.title) || a.pool.localeCompare(b.pool)) };
+  });
 
   // 2. Context-size impact buckets (<50k, 50-150k, 150-250k, >250k)
   const rawBuckets = CONTEXT_BUCKET_DEFS.map(def => ({
@@ -638,6 +674,7 @@ function buildPeriodAnalytics(sameRequests, history, since, until, provider, buc
     byEffort,
     byProject: projects,
     topPrompts,
+    quotaRankings,
     contextBuckets,
     topChats,
     series,
@@ -682,6 +719,12 @@ export function analyticsSummary(history, until, provider = 'codex', live = [], 
       if (!set) { set = new Set([rootKey]); groupedMembers.set(rootKey, set); }
       set.add(turn.key);
     }
+    const requestsByRoot = new Map();
+    for (const req of sameRequests) {
+      const root = resolveTurnRoot(req.turn);
+      if (!requestsByRoot.has(root)) requestsByRoot.set(root, []);
+      requestsByRoot.get(root).push(req);
+    }
     const seenRoots = new Set();
     for (const req of sameRequests) {
       if (req.time > cutoff30d) seenRoots.add(resolveTurnRoot(req.turn));
@@ -700,20 +743,21 @@ export function analyticsSummary(history, until, provider = 'codex', live = [], 
         if (Number.isFinite(mt.last) && mt.last > lastReq) lastReq = mt.last;
         ends.push(mt.ended);
       }
-      const start = turn.started ?? firstReq;
+      const sent = [...(turn.messages?.values() ?? [])].reduce((first, row) => Math.min(first, row.time), Infinity);
+      const start = Number.isFinite(sent) ? sent : turn.started ?? firstReq;
       const knownEnd = ends.length > 0 && ends.every(e => Number.isFinite(e) && e <= until) ? Math.max(...ends) : null;
       const end = knownEnd ?? lastReq;
       if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
       const q = interactionQuota(series, {
         reference: rootKey,
+        pool: quotaPool(provider, requestsByRoot.get(rootKey) ?? [], history),
         members,
-        startedAt: turn.started ? new Date(turn.started).toISOString() : null,
+        startedAt: Number.isFinite(sent) ? new Date(sent).toISOString() : Number.isFinite(turn.started) ? new Date(turn.started).toISOString() : null,
         endedAt: knownEnd !== null ? new Date(knownEnd).toISOString() : null,
         firstRequest: firstReq,
         lastRequest: lastReq,
       }, history);
       turnQuotaMap.set(rootKey, q);
-      for (const mk of members) turnQuotaMap.set(mk, q);
     }
   }
 
@@ -775,10 +819,7 @@ function promptQuotaProfile(series, history, until, provider) {
     const sent = [...(turn.messages?.values() ?? [])][0]?.time ?? turn.started;
     const ends = [...members].map(key => history.turns.get(key)?.ended);
     if (!Number.isFinite(sent) || sent < cutoff || !ends.every(end => Number.isFinite(end) && end <= until)) return [];
-    const models = requests.map(req => resolveReqModel(req, history.turns.get(req.turn)));
-    const modelPools = new Set(models.map(model => /gemini/i.test(model) ? 'gemini' :
-      /claude|gpt/i.test(model) ? 'claude_gpt' : null));
-    const pool = provider === 'codex' ? 'codex' : modelPools.size === 1 ? [...modelPools][0] : null;
+    const pool = quotaPool(provider, requests, history);
     if (!pool) return [];
     const end = Math.max(...ends);
     return [{ pool, reference, members, startedAt: new Date(sent).toISOString(), endedAt: new Date(end).toISOString(),
@@ -786,8 +827,10 @@ function promptQuotaProfile(series, history, until, provider) {
   }).sort((a, b) => b.end - a.end);
   for (const turn of groups) {
     for (const impact of interactionQuota(series, turn, history)) {
-      if ((impact.pool ?? 'codex') !== turn.pool || impact.status !== 'observed' || !(impact.deltaPp > 0)) continue;
+      if ((impact.pool ?? 'codex') !== turn.pool || impact.status !== 'observed' || !Number.isFinite(impact.deltaPp)) continue;
       if (codexPlan && impact.plan !== codexPlan) continue;
+      if (impact.fluctuated || Date.parse(turn.startedAt) - Date.parse(impact.before.at) > 60_000 ||
+          Date.parse(impact.after.at) - turn.end > 60_000) continue;
       if (provider === 'antigravity' && (impact.before.source !== 'agy-cli' || impact.after.source !== 'agy-cli')) continue;
       const key = `${turn.pool}/${impact.minutes}`;
       const samples = pools.get(key) ?? { pool: turn.pool, minutes: impact.minutes, drops: [], nextStart: Infinity };
@@ -799,20 +842,82 @@ function promptQuotaProfile(series, history, until, provider) {
     }
   }
   return [...pools.values()].map(({ pool, minutes, drops }) => {
-    drops.sort((a, b) => a - b);
-    const quantile = q => {
-      const index = (drops.length - 1) * q;
+    const quantile = (sorted, q) => {
+      const index = (sorted.length - 1) * q;
       const low = Math.floor(index);
-      return drops[low] + (drops[Math.ceil(index)] - drops[low]) * (index - low);
+      return sorted[low] + (sorted[Math.ceil(index)] - sorted[low]) * (index - low);
     };
-    return { pool, minutes, count: drops.length, typical: quantile(0.5), low: quantile(0.25), high: quantile(0.75) };
+    const earlier = [];
+    let checked = 0;
+    let inside = 0;
+    for (const drop of [...drops].reverse()) {
+      if (earlier.length >= 8) {
+        checked++;
+        if (drop >= quantile(earlier, 0.25) && drop <= quantile(earlier, 0.75)) inside++;
+      }
+      earlier.push(drop);
+      earlier.sort((a, b) => a - b);
+    }
+    return { pool, minutes, count: drops.length, typical: quantile(earlier, 0.5),
+      low: quantile(earlier, 0.25), high: quantile(earlier, 0.75),
+      ...(checked ? { validation: { inside, checked } } : {}) };
+
   });
+}
+
+function interactionCalls(reference, requests, history, provider, quotaTurn, series) {
+  const actors = new Map();
+  const poolOwners = new Map();
+  const labels = new Map();
+  const labelsByTurn = new Map();
+  let allPoolsKnown = true;
+  for (const request of requests) {
+    const turn = history.turns.get(request.turn);
+    const main = request.turn === reference;
+    const key = main ? reference : turn?.agentReference ?? request.turn;
+    if (!actors.has(key)) actors.set(key, {
+      label: main ? 'Agente principal' : turn?.agentName ||
+        (turn?.agentReference ? 'Subagente ' + (1 + [...actors.values()].filter(row => row.kind === 'subagent').length) : 'Ejecución vinculada'),
+      kind: main ? 'main' : turn?.agentReference ? 'subagent' : 'related',
+      requests: [], models: new Set(),
+    });
+    const actor = actors.get(key);
+    actor.requests.push(request);
+    actor.models.add(resolveReqModel(request, turn));
+    labels.set(request, actor.label);
+    labelsByTurn.set(request.turn, actor.label);
+    const pool = provider === 'antigravity' ? antigravityRequestPool(request, turn) : 'codex';
+    if (!pool) allPoolsKnown = false;
+    if (!poolOwners.has(pool)) poolOwners.set(pool, new Set());
+    poolOwners.get(pool).add(key);
+  }
+  const separatePools = allPoolsKnown && poolOwners.size > 1;
+  const quota = separatePools
+    ? [...poolOwners.keys()].flatMap(pool => interactionQuota(series, { ...quotaTurn, pool }, history))
+    : interactionQuota(series, quotaTurn, history);
+  const activity = [...actors].map(([key, actor]) => ({
+    label: actor.label, kind: actor.kind, models: [...actor.models], calls: actor.requests.length,
+    firstAt: new Date(actor.requests[0].time).toISOString(),
+    lastAt: new Date(actor.requests.at(-1).time).toISOString(),
+    tokens: summarizeRequests(actor.requests, provider),
+    quota: separatePools && actors.size > 1 ? quota.filter(impact => {
+      const owners = poolOwners.get(impact.pool);
+      return owners?.size === 1 && owners.has(key) && impact.status === 'observed' && !impact.fluctuated;
+    }) : [],
+  }));
+  const tools = [...quotaTurn.members].flatMap(key => [...(history.turns.get(key)?.tools?.values() ?? [])]
+    .filter(tool => tool.time <= quotaTurn.until)
+    .map(tool => ({ ...tool, actor: labelsByTurn.get(key) ?? (key === reference ? 'Agente principal' : 'Ejecución vinculada') })));
+  tools.sort((a, b) => a.time - b.time);
+  return { activity, labels, quota, observedTools: tools.length,
+    tools: tools.slice(-50).map(tool => ({ name: tool.name, actor: tool.actor, at: new Date(tool.time).toISOString() })) };
 }
 
 export function interactionSummary(history, since, until, live = [], bySession = false, quotaOptions = undefined) {
   const provider = quotaOptions?.provider ?? (quotaOptions?.buckets ? 'antigravity' : 'codex');
   const series = quotaObservations(history, live, until, quotaOptions);
   const quotaTurns = [];
+  const roots = new Map();
   const interactions = interactionGroups(history, bySession ? -Infinity : since, until).flatMap(({ reference, members, requests }) => {
     requests.sort((left, right) => left.time - right.time);
     const turn = history.turns.get(reference);
@@ -841,6 +946,13 @@ export function interactionSummary(history, since, until, live = [], bySession =
     });
     const apiCost = aggregateCosts(pricedAll);
     const recentSliceStart = Math.max(0, requests.length - 80);
+    const quotaTurn = {
+      reference, members, pool: quotaPool(provider, requests, history),
+      startedAt: (sent ?? started) === null ? null : new Date(sent ?? started).toISOString(),
+      endedAt: knownEnd === null ? null : new Date(knownEnd).toISOString(),
+      firstRequest: firstActivity, lastRequest: lastActivity, until,
+    };
+    const calls = bySession ? interactionCalls(reference, requests, history, provider, quotaTurn, series) : null;
     const detail = {
       reference,
       kind: question ? 'question' : 'other',
@@ -862,10 +974,14 @@ export function interactionSummary(history, since, until, live = [], bySession =
       apiCost,
       additionalRequests: requests.length - Number(Boolean(firstMain)),
       childRequests: requests.filter(request => request.turn !== reference).length,
+      ...(calls ? { activity: calls.activity,
+        ...(provider === 'codex' ? { toolCalls: calls.tools, observedTools: calls.observedTools } : {}) } : {}),
       requests: requests.slice(recentSliceStart).map((request, idx) => {
         const priced = pricedAll[recentSliceStart + idx];
         return {
           at: new Date(request.time).toISOString(), usage: request.usage,
+          ...(calls ? { actor: calls.labels.get(request),
+            model: resolveReqModel(request, history.turns.get(request.turn)) } : {}),
           ...(priced?.available ? {
             costUsd: priced.usd,
             tier: priced.tier,
@@ -876,12 +992,11 @@ export function interactionSummary(history, since, until, live = [], bySession =
         };
       }),
     };
-    const quotaTurn = {
-      reference, members, startedAt: detail.sentAt ?? detail.startedAt, endedAt: detail.endedAt,
-      firstRequest: firstActivity, lastRequest: lastActivity,
-    };
-    if (bySession) quotaTurns.push(quotaTurn);
-    return [{ ...detail, quota: interactionQuota(series, quotaTurn, history) }];
+    if (bySession) {
+      quotaTurns.push(quotaTurn);
+      for (const member of members) roots.set(member, reference);
+    }
+    return [{ ...detail, quota: calls?.quota ?? interactionQuota(series, quotaTurn, history) }];
   });
   interactions.sort((left, right) => (right.sentAt ?? right.lastRequestAt).localeCompare(left.sentAt ?? left.lastRequestAt));
   const questions = interactions.filter(row => row.kind === 'question');
@@ -893,9 +1008,9 @@ export function interactionSummary(history, since, until, live = [], bySession =
     const sessionRequests = [...history.requests.values()].filter(req => {
       if (req.scope !== 'same' || req.time > until) return false;
       const turn = history.turns.get(req.turn);
-      return turn?.session === history.selectedSession;
+      return roots.has(req.turn) || turn?.session === history.selectedSession;
     });
-    sessionModelComparison = buildModelEffortComparison(sessionRequests, history, provider, turnQuotaMap).byModelEffort;
+    sessionModelComparison = buildModelEffortComparison(sessionRequests, history, provider, turnQuotaMap, key => roots.get(key) ?? key).byModelEffort;
   }
 
   return {

@@ -109,7 +109,7 @@ export async function openCodex(executable, cwd, projects = false) {
       if (cursor && (seenCursors.has(cursor) || seenCursors.size >= 15)) break;
       if (cursor) seenCursors.add(cursor);
     } while (cursor);
-    return rows;
+    return { rows, partial: Boolean(cursor) };
   }
 
   async function close() {
@@ -137,9 +137,10 @@ export async function openCodex(executable, cwd, projects = false) {
         const [projects, current, archived] = await Promise.all([
           list('project/list'),
           list('thread/list', { ...threadParams, archived: false }),
-          list('thread/list', { ...threadParams, archived: true }).catch(() => []),
+          list('thread/list', { ...threadParams, archived: true }).catch(() => ({ rows: [], partial: true })),
         ]);
-        return { projects, threads: [...current, ...archived] };
+        return { projects: projects.rows, threads: [...current.rows, ...archived.rows],
+          partial: projects.partial || current.partial || archived.partial };
       },
       async snapshot() {
         const started = Date.now();

@@ -24,6 +24,7 @@ internal sealed class ProviderState(ProviderKind kind, Brush initialColor)
     public JsonElement CurrentAnalytics { get; set; }
     public SessionOption[] AvailableSessions { get; set; } = [];
     public string? PendingSession { get; set; }
+    public string? SessionSelectionId { get; set; }
     public string SelectedProject { get; set; } = "*";
 }
 

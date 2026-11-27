@@ -624,7 +624,7 @@
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
                                             <DataGridTextColumn Header="Tokens" Binding="{Binding TokensShort}" SortMemberPath="TotalTokens" Width="0.98*"/>
-                                            <DataGridTextColumn Header="Costo API" Binding="{Binding CostText}" SortMemberPath="CostUsd" Width="0.82*">
+                                            <DataGridTextColumn Visibility="Collapsed" Header="Costo API" Binding="{Binding CostText}" SortMemberPath="CostUsd" Width="0.82*">
                                                 <DataGridTextColumn.ElementStyle>
                                                     <Style TargetType="TextBlock">
                                                         <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=DataGridRow}}"/>
@@ -698,7 +698,27 @@
                                                 </StackPanel>
                                             </Border>
 
-                                            <Expander x:Name="CallsExpander" Header="Ver pasos del modelo">
+                                            <TextBlock x:Name="InteractionActivity" TextWrapping="Wrap" Style="{StaticResource Meta}" Margin="0,4,0,6"/>
+                                            <DataGrid x:Name="InteractionActors" Style="{StaticResource ChatQuotaGrid}" MaxHeight="180" Margin="0,0,0,8">
+                                                <DataGrid.Columns>
+                                                    <DataGridTextColumn Header="Quién intervino" Binding="{Binding Actor}" Width="1.35*"/>
+                                                    <DataGridTextColumn Header="Modelos" Binding="{Binding Models}" Width="1.4*"/>
+                                                    <DataGridTextColumn Header="Horario de llamadas" Binding="{Binding Time}" Width="1.15*"/>
+                                                    <DataGridTextColumn Header="Llamadas" Binding="{Binding Calls}" Width="0.65*"/>
+                                                    <DataGridTextColumn Header="Tokens medidos" Binding="{Binding Tokens}" Width="0.85*"/>
+                                                    <DataGridTextColumn Header="Cuota por agente" Binding="{Binding Quota}" Width="1.65*" ElementStyle="{StaticResource QuotaValueCell}"/>
+                                                </DataGrid.Columns>
+                                            </DataGrid>
+                                            <Expander x:Name="InteractionTools" Header="Herramientas registradas" Margin="0,0,0,8">
+                                                <DataGrid x:Name="InteractionToolGrid" Style="{StaticResource ChatQuotaGrid}" MaxHeight="180" Margin="0,4,0,0">
+                                                    <DataGrid.Columns>
+                                                        <DataGridTextColumn Header="Hora" Binding="{Binding Time}" Width="*"/>
+                                                        <DataGridTextColumn Header="Origen" Binding="{Binding Actor}" Width="2*"/>
+                                                        <DataGridTextColumn Header="Herramienta" Binding="{Binding Name}" Width="3*"/>
+                                                    </DataGrid.Columns>
+                                                </DataGrid>
+                                            </Expander>
+                                            <Expander x:Name="CallsExpander" Header="Ver llamadas al modelo">
                                                 <DataGrid x:Name="RequestsGrid" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,8,0,0"
                                                           CanUserAddRows="False" Background="{DynamicResource BgSurface}" Foreground="{DynamicResource TextPrimary}"
                                                           BorderBrush="{DynamicResource BorderSubtle}" GridLinesVisibility="Horizontal"
@@ -706,7 +726,7 @@
                                                           RowHeaderWidth="0" MaxHeight="250" RowHeight="31">
                                                     <DataGrid.Columns>
                                                         <DataGridTextColumn Header="Hora" Binding="{Binding Time}" Width="0.8*"/>
-                                                        <DataGridTextColumn Header="Tipo de paso" Binding="{Binding Kind}" Width="1.1*">
+                                                        <DataGridTextColumn Header="Origen" Binding="{Binding Kind}" Width="1.4*">
                                                             <DataGridTextColumn.ElementStyle>
                                                                 <Style TargetType="TextBlock">
                                                                     <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=DataGridRow}}"/>
@@ -714,12 +734,13 @@
                                                                 </Style>
                                                             </DataGridTextColumn.ElementStyle>
                                                         </DataGridTextColumn>
+                                                        <DataGridTextColumn Header="Modelo" Binding="{Binding Model}" Width="1.25*"/>
                                                         <DataGridTextColumn Header="Contexto" Binding="{Binding Context}" Width="0.95*"/>
                                                         <DataGridTextColumn Header="Entrada" Binding="{Binding Input}" Width="0.85*"/>
                                                         <DataGridTextColumn Header="Caché" Binding="{Binding Cache}" Width="0.95*"/>
                                                         <DataGridTextColumn Header="Salida" Binding="{Binding Output}" Width="0.85*"/>
                                                         <DataGridTextColumn Header="Razonam." Binding="{Binding Reasoning}" Width="0.85*"/>
-                                                        <DataGridTextColumn Header="Costo API" Binding="{Binding Cost}" Width="0.85*"/>
+                                                        <DataGridTextColumn Visibility="Collapsed" Header="Costo API" Binding="{Binding Cost}" Width="0.85*"/>
                                                     </DataGrid.Columns>
                                                 </DataGrid>
                                             </Expander>
@@ -784,8 +805,8 @@
                                                 <DataGridTextColumn Header="Prompts" Binding="{Binding Turns}" Width="0.68*"/>
                                                 <DataGridTextColumn Header="Pasos/prompt" Binding="{Binding AvgSteps}" Width="0.85*"/>
                                                 <DataGridTextColumn Header="Caché" Binding="{Binding Cache}" Width="0.68*"/>
-                                                <DataGridTextColumn Header="Costo API" Binding="{Binding Cost}" Width="0.82*"/>
-                                                <DataGridTextColumn Header="$/prompt" Binding="{Binding AvgTurn}" Width="0.82*"/>
+                                                <DataGridTextColumn Visibility="Collapsed" Header="Costo API" Binding="{Binding Cost}" Width="0.82*"/>
+                                                <DataGridTextColumn Visibility="Collapsed" Header="$/prompt" Binding="{Binding AvgTurn}" Width="0.82*"/>
                                                 <DataGridTextColumn Header="5 h / prompt" Binding="{Binding Drop5h}" Width="0.88*" ElementStyle="{StaticResource QuotaValueCell}"/>
                                                 <DataGridTextColumn Header="Sem. / prompt" Binding="{Binding DropWeek}" Width="0.9*" ElementStyle="{StaticResource QuotaValueCell}"/>
                                             </DataGrid.Columns>
@@ -815,37 +836,87 @@
                     </DockPanel>
 
                     <!-- Row 1: Averages per Chat & per Prompt -->
-                    <UniformGrid Columns="4" Margin="-6,0,-6,16">
+                    <UniformGrid Columns="2" Margin="-6,0,-6,16">
                         <Border Style="{StaticResource Card}" Background="{DynamicResource BgSurfaceTint}" BorderBrush="{DynamicResource BorderTint}" Padding="15" Margin="6,0">
                             <StackPanel>
-                                <TextBlock Text="Cuota 5 h prom. / chat" Style="{StaticResource Meta}" FontSize="12"/>
+                                <TextBlock Text="5 horas · promedio por chat" Style="{StaticResource Meta}" FontSize="12"/>
                                 <TextBlock x:Name="Avg5hSessionValue" Text="—" Style="{StaticResource KpiValue}" Foreground="{DynamicResource AccentPrimary}"/>
                                 <TextBlock x:Name="Avg5hTurnSub" Text="Sin prompts con cuota medida" Style="{StaticResource Meta}" FontSize="11"/>
                             </StackPanel>
                         </Border>
                         <Border Style="{StaticResource Card}" Background="{DynamicResource BgSurfaceMint}" BorderBrush="{DynamicResource BorderMint}" Padding="15" Margin="6,0">
                             <StackPanel>
-                                <TextBlock Text="Cuota Semanal prom. / chat" Style="{StaticResource Meta}" FontSize="12"/>
+                                <TextBlock Text="Semanal · promedio por chat" Style="{StaticResource Meta}" FontSize="12"/>
                                 <TextBlock x:Name="AvgWeekSessionValue" Text="—" Style="{StaticResource KpiValue}" Foreground="{DynamicResource AccentSecondary}"/>
                                 <TextBlock x:Name="AvgWeekTurnSub" Text="Sin muestras semanales" Style="{StaticResource Meta}" FontSize="11"/>
                             </StackPanel>
                         </Border>
-                        <Border Style="{StaticResource Card}" Padding="15" Margin="6,0">
-                            <StackPanel>
-                                <TextBlock Text="Costo API prom. / chat" Style="{StaticResource Meta}" FontSize="12"/>
-                                <TextBlock x:Name="AvgCostSessionValue" Text="—" Style="{StaticResource KpiValue}"/>
-                                <TextBlock x:Name="AvgCostSessionSub" Text="—" Style="{StaticResource Meta}" FontSize="11"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource Card}" Padding="15" Margin="6,0">
-                            <StackPanel>
-                                <TextBlock Text="Costo API prom. / prompt" Style="{StaticResource Meta}" FontSize="12"/>
-                                <TextBlock x:Name="AvgCostTurnValue" Text="—" Style="{StaticResource KpiValue}"/>
-                                <TextBlock x:Name="AvgCostTurnSub" Text="—" Style="{StaticResource Meta}" FontSize="11"/>
-                            </StackPanel>
-                        </Border>
                     </UniformGrid>
 
+                    <Border Style="{StaticResource Card}" Padding="14" Margin="0,0,0,12">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,8">
+                                <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                                    <ComboBox x:Name="UsageWindowPicker" Margin="0,0,8,0" SelectedIndex="0" SelectionChanged="SelectUsageRanking" AutomationProperties.Name="Ventana de cuota">
+                                        <ComboBoxItem Content="5 horas"/>
+                                        <ComboBoxItem Content="Semanal"/>
+                                    </ComboBox>
+                                    <ComboBox x:Name="UsageRankingPicker" SelectedIndex="0" SelectionChanged="SelectUsageRanking" AutomationProperties.Name="Vista de consumo">
+                                        <ComboBoxItem Content="Prompts"/>
+                                        <ComboBoxItem Content="Chats"/>
+                                        <ComboBoxItem Content="Por fecha"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <TextBlock Text="Consumo medido" Style="{StaticResource CardTitle}" VerticalAlignment="Center"/>
+                            </DockPanel>
+                            <TextBlock x:Name="UsageRankingHint" Style="{StaticResource Meta}" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                            <DataGrid x:Name="UsageRankingGrid" Style="{StaticResource ChatQuotaGrid}" MaxHeight="315">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn x:Name="UsageRankingDate" Header="Fecha" Binding="{Binding Time}" Width="1.1*"/>
+                                    <DataGridTextColumn Header="Actividad" Binding="{Binding Title}" Width="4*"/>
+                                    <DataGridTextColumn Header="Cuota de" Binding="{Binding Pool}" Width="*"/>
+                                    <DataGridTextColumn x:Name="UsageRankingDrop" Header="Bajó" Binding="{Binding Drop}" Width="*" ElementStyle="{StaticResource QuotaValueCell}"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}" Padding="14" Margin="0,0,0,12">
+                        <Expander Header="Modelos y esfuerzo" Foreground="{DynamicResource TextPrimary}" Expanded="ExpandAnalyticsSection">
+                            <StackPanel Margin="0,12,0,0">
+                                <DockPanel Margin="0,0,0,12">
+                                    <Border DockPanel.Dock="Right" Background="{DynamicResource BgSurfaceAlt}" BorderBrush="{DynamicResource BorderSubtle}"
+                                            BorderThickness="1" CornerRadius="8" Padding="2">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button x:Name="MetricDrop5hBtn" Style="{StaticResource SegmentButton}" Content="5 h / prompt" Tag="drop5h" Click="SelectComparisonMetric" Padding="11,4"/>
+                                            <Button x:Name="MetricDropWeekBtn" Style="{StaticResource SegmentButton}" Content="Semanal / prompt" Tag="dropWeek" Click="SelectComparisonMetric" Padding="11,4"/>
+                                            <Button x:Name="MetricAvgTurnBtn" Visibility="Collapsed" Style="{StaticResource SegmentButton}" Content="$/prompt" Tag="avgTurn" Click="SelectComparisonMetric" Padding="11,4"/>
+                                            <Button x:Name="MetricUsdBtn" Visibility="Collapsed" Style="{StaticResource SegmentButton}" Content="Costo total" Tag="usd" Click="SelectComparisonMetric" Padding="11,4"/>
+                                        </StackPanel>
+                                    </Border>
+                                </DockPanel>
+                                <Grid Height="215" Margin="0,0,0,12">
+                                    <Canvas x:Name="ModelComparisonChart" SizeChanged="ChartSizeChanged" ClipToBounds="True"/>
+                                    <TextBlock x:Name="ModelComparisonEmpty" Text="Sin datos suficientes para esta métrica en el período seleccionado."
+                                               Style="{StaticResource Meta}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Grid>
+                                <DataGrid x:Name="ModelEffortGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                                          Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource BorderSubtle}"
+                                          GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="{DynamicResource GridLine}"
+                                          HeadersVisibility="Column" RowHeaderWidth="0" MaxHeight="300" RowHeight="33">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Modelo" Binding="{Binding Model}" Width="1.45*"/>
+                                        <DataGridTextColumn Header="Esfuerzo" Binding="{Binding Effort}" Width="0.9*"/>
+                                        <DataGridTextColumn Header="Prompts" Binding="{Binding Turns}" Width="0.68*"/>
+                                        <DataGridTextColumn Header="Pasos/prompt" Binding="{Binding AvgSteps}" Width="0.88*"/>
+                                        <DataGridTextColumn Header="5 h / prompt" Binding="{Binding Drop5h}" Width="0.95*" ElementStyle="{StaticResource QuotaValueCell}"/>
+                                        <DataGridTextColumn Header="Sem. / prompt" Binding="{Binding DropWeek}" Width="0.98*" ElementStyle="{StaticResource QuotaValueCell}"/>
+                                        <DataGridTextColumn Header="Caché" Binding="{Binding Cache}" Width="0.68*"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </StackPanel>
+                        </Expander>
+                    </Border>
                     <Border Style="{StaticResource Card}" Padding="14" Margin="0,0,0,12">
                         <Expander Header="Tamaño del chat y esfuerzo" Foreground="{DynamicResource TextPrimary}" Expanded="ExpandAnalyticsSection">
                             <Grid Margin="0,12,0,0">
@@ -881,45 +952,7 @@
                     </Border>
 
                     <Border Style="{StaticResource Card}" Padding="14" Margin="0,0,0,12">
-                        <Expander Header="Modelos y esfuerzo" Foreground="{DynamicResource TextPrimary}" Expanded="ExpandAnalyticsSection">
-                            <StackPanel Margin="0,12,0,0">
-                                <DockPanel Margin="0,0,0,12">
-                                    <Border DockPanel.Dock="Right" Background="{DynamicResource BgSurfaceAlt}" BorderBrush="{DynamicResource BorderSubtle}"
-                                            BorderThickness="1" CornerRadius="8" Padding="2">
-                                        <StackPanel Orientation="Horizontal">
-                                            <Button x:Name="MetricDrop5hBtn" Style="{StaticResource SegmentButton}" Content="5 h / prompt" Tag="drop5h" Click="SelectComparisonMetric" Padding="11,4"/>
-                                            <Button x:Name="MetricDropWeekBtn" Style="{StaticResource SegmentButton}" Content="Semanal / prompt" Tag="dropWeek" Click="SelectComparisonMetric" Padding="11,4"/>
-                                            <Button x:Name="MetricAvgTurnBtn" Style="{StaticResource SegmentButton}" Content="$/prompt" Tag="avgTurn" Click="SelectComparisonMetric" Padding="11,4"/>
-                                            <Button x:Name="MetricUsdBtn" Style="{StaticResource SegmentButton}" Content="Costo total" Tag="usd" Click="SelectComparisonMetric" Padding="11,4"/>
-                                        </StackPanel>
-                                    </Border>
-                                </DockPanel>
-                                <Grid Height="215" Margin="0,0,0,12">
-                                    <Canvas x:Name="ModelComparisonChart" SizeChanged="ChartSizeChanged" ClipToBounds="True"/>
-                                    <TextBlock x:Name="ModelComparisonEmpty" Text="Sin datos suficientes para esta métrica en el período seleccionado."
-                                               Style="{StaticResource Meta}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Grid>
-                                <DataGrid x:Name="ModelEffortGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
-                                          Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource BorderSubtle}"
-                                          GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="{DynamicResource GridLine}"
-                                          HeadersVisibility="Column" RowHeaderWidth="0" MaxHeight="300" RowHeight="33">
-                                    <DataGrid.Columns>
-                                        <DataGridTextColumn Header="Modelo" Binding="{Binding Model}" Width="1.45*"/>
-                                        <DataGridTextColumn Header="Esfuerzo" Binding="{Binding Effort}" Width="0.9*"/>
-                                        <DataGridTextColumn Header="Prompts" Binding="{Binding Turns}" Width="0.68*"/>
-                                        <DataGridTextColumn Header="Pasos/prompt" Binding="{Binding AvgSteps}" Width="0.88*"/>
-                                        <DataGridTextColumn Header="5 h / prompt" Binding="{Binding Drop5h}" Width="0.95*" ElementStyle="{StaticResource QuotaValueCell}"/>
-                                        <DataGridTextColumn Header="Sem. / prompt" Binding="{Binding DropWeek}" Width="0.98*" ElementStyle="{StaticResource QuotaValueCell}"/>
-                                        <DataGridTextColumn Header="Caché" Binding="{Binding Cache}" Width="0.68*"/>
-                                        <DataGridTextColumn Header="Costo API" Binding="{Binding Cost}" Width="0.85*"/>
-                                        <DataGridTextColumn Header="$/prompt" Binding="{Binding AvgTurn}" Width="0.85*"/>
-                                    </DataGrid.Columns>
-                                </DataGrid>
-                            </StackPanel>
-                        </Expander>
-                    </Border>
-                    <Border Style="{StaticResource Card}" Padding="14" Margin="0,0,0,12">
-                        <Expander Header="Costos y actividad" Foreground="{DynamicResource TextPrimary}" Expanded="ExpandAnalyticsSection">
+                        <Expander Header="Equivalente API y caché" Foreground="{DynamicResource TextPrimary}" Expanded="ExpandAnalyticsSection">
                             <StackPanel Margin="0,12,0,0">
                                 <UniformGrid Columns="4" Margin="-6,0,-6,16">
                                     <Border Style="{StaticResource Card}" Background="{DynamicResource BgSurfaceTint}" BorderBrush="{DynamicResource BorderTint}" Padding="15" Margin="6,0">

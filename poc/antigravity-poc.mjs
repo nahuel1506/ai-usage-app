@@ -177,9 +177,11 @@ async function main() {
   const input = values['stop-on-stdin-close'] ? createInterface({ input: process.stdin }) : null;
   input?.on('line', async line => {
     if (!values.watch) return;
-    const session = /^session ([a-f0-9]{16})$/.exec(line)?.[1];
+    const selection = /^session ([a-f0-9]{16})(?: ([0-9]+))?$/.exec(line);
+    const session = selection?.[1];
     if (session) {
       workspace.selected = session;
+      workspace.selectionId = selection[2];
       pendingRefresh = true;
       delay?.abort();
       return;
@@ -231,6 +233,7 @@ async function main() {
         }
         pendingRefresh = false;
         const requested = workspace.selected ?? null;
+        const selectionId = workspace.selectionId;
 
         // Read official `agy /usage` quota and local SQLite conversations in parallel
         const [agyResult, history] = await Promise.all([
@@ -267,7 +270,10 @@ async function main() {
               buckets: AG_BUCKETS,
             })
           : undefined;
-        if (details && values['session-view']) details.requestedSession = requested;
+        if (details && values['session-view']) {
+          details.requestedSession = requested;
+          details.selectionId = selectionId;
+        }
 
         const baseFrame = {
           type: 'sample',

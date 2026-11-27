@@ -576,6 +576,7 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
       turns.set(key, cloneTurn(turn, {
         session: rootSessionRef,
         child: true,
+        agentReference: reference(salt, "ag-agent/" + idLower),
         composer: false,
         messages: new Map(),
         ended: turn.ended ?? (Number.isFinite(turn.last) ? turn.last : null),
@@ -598,12 +599,21 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
     if (!sessions.has(ref)) sessions.set(ref, { reference: ref, partial: true });
   }
   const projectsMap = new Map();
+  const nativeByFolder = new Map();
+  for (const session of sessions.values()) {
+    const summary = catalog.get(session.reference);
+    const folder = workspaceKey(summary?.workspaceUri ?? session.workspaceUri);
+    if (!folder || !summary?.projectReference) continue;
+    if (!nativeByFolder.has(folder)) nativeByFolder.set(folder, new Set());
+    nativeByFolder.get(folder).add(summary.projectReference);
+  }
   const sessionCatalog = [...sessions.values()].map(({ workspaceUri, projectName, ...session }) => {
     const summary = catalog.get(session.reference);
     const folder = summary?.workspaceUri ?? workspaceUri;
     const folderKey = workspaceKey(folder);
+    const compatible = nativeByFolder.get(folderKey);
     const projectReference = summary?.projectReference ??
-      (folderKey ? reference(salt, 'ag-project/' + folderKey) : '');
+      (compatible?.size === 1 ? [...compatible][0] : folderKey ? reference(salt, 'ag-project/' + folderKey) : '');
     return {
       ...session,
       nativeTitle: summary?.title ?? session.nativeTitle,
@@ -614,7 +624,8 @@ export async function recentAntigravityHistory(home = defaultAntigravityHome(), 
     };
   }).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))
     .map(({ projectName, ...session }) => {
-      if (session.projectReference && !projectsMap.get(session.projectReference)?.name)
+      const previous = projectsMap.get(session.projectReference)?.name;
+      if (session.projectReference && (!previous || (projectName && projectName.localeCompare(previous, 'es') < 0)))
         projectsMap.set(session.projectReference, { reference: session.projectReference, name: projectName });
       return session;
     });

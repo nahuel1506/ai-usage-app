@@ -75,8 +75,12 @@ async function main() {
   const input = values['stop-on-stdin-close'] ? createInterface({ input: process.stdin }) : null;
   input?.on('line', line => {
     if (!values.watch) return;
-    const session = /^session ([a-f0-9]{16})$/.exec(line)?.[1];
-    if (session && workspace) workspace.selected = session;
+    const selection = /^session ([a-f0-9]{16})(?: ([0-9]+))?$/.exec(line);
+    const session = selection?.[1];
+    if (session && workspace) {
+      workspace.selected = session;
+      workspace.selectionId = selection[2];
+    }
     else if (line !== 'sample') return;
     if (line === 'sample' && workspace) workspace.projectRefreshAt = 0;
     pendingRefresh = true;
@@ -135,6 +139,8 @@ async function main() {
             workspace.accountId = current.accountId;
             workspace.selected = null;
             workspace.projectIndex = undefined;
+            workspace.projectCatalogAt = undefined;
+            workspace.projectCatalogStale = true;
             workspace.projectRefreshAt = 0;
             workspace.cache.clear();
             workspace.recentCache?.clear();
@@ -146,14 +152,19 @@ async function main() {
                 client.projectIndex(),
                 readProjectFolders(join(dataFolder, 'project-folders.json')),
               ]);
-              workspace.projectIndex = prepareProjectIndex(catalog, salt, folders);
+              if (!catalog.partial || !workspace.projectCatalogAt)
+                workspace.projectIndex = prepareProjectIndex(catalog, salt, folders);
+              if (!catalog.partial) workspace.projectCatalogAt = new Date().toISOString();
+              workspace.projectCatalogStale = catalog.partial;
               workspace.projectRefreshAt = Date.now() + interval * 1000;
             } catch {
+              workspace.projectCatalogStale = true;
               workspace.projectRefreshAt = Date.now() + 30000;
             }
           }
         }
         const requested = workspace?.selected ?? null;
+        const selectionId = workspace?.selectionId;
         const history = await recentHistory(home, current.accountId, salt, values.details && values['question-previews'],
           workspace ? { ...workspace, projectIndex: current.accountId ? workspace.projectIndex : undefined, selected: requested } : undefined);
         const until = Date.now();
@@ -165,7 +176,12 @@ async function main() {
         const details = values.details
           ? interactionSummary(history, since, until, quotaPoints, Boolean(workspace))
           : undefined;
-        if (details && workspace) details.requestedSession = requested;
+        if (details && workspace) {
+          details.requestedSession = requested;
+          details.selectionId = selectionId;
+          details.projectCatalogAt = workspace.projectCatalogAt;
+          details.projectCatalogStale = workspace.projectCatalogStale;
+        }
         await record({
           type: 'sample',
           quota: current.sample,
